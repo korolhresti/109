@@ -285,14 +285,14 @@ async def translate_text_gemini(text: str, target_language: str) -> Optional[str
     prompt = f"Переклади наступний текст на {target_language} мову, зберігаючи оригінальне форматування (наприклад, HTML-теги, якщо вони є). Тільки переклад, без додаткових коментарів:\n\n{text}"
     
     chat_history = []
-    chat_history.push({ "role": "user", "parts": [{ "text": prompt }] })
+    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] }) # Виправлено .push на .append
     payload = { "contents": chat_history }
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     try:
         async with ClientSession() as session:
-            async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, json=payload) as response:
+            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response: # Виправлено apiUrl на api_url
                 response.raise_for_status()
                 result = await response.json()
                 
@@ -313,14 +313,14 @@ async def explain_term_gemini(term: str) -> Optional[str]:
     prompt = f"Будь ласка, поясніть термін або поняття '{term}' простою та зрозумілою мовою, надаючи ключові визначення та, можливо, короткий приклад. Відповідь має бути українською."
     
     chat_history = []
-    chat_history.push({ "role": "user", "parts": [{ "text": prompt }] })
+    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] }) # Виправлено .push на .append
     payload = { "contents": chat_history }
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     try:
         async with ClientSession() as session:
-            async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, json=payload) as response:
+            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response: # Виправлено apiUrl на api_url
                 response.raise_for_status()
                 result = await response.json()
                 
