@@ -1,14 +1,14 @@
 import asyncio
 import logging
 import logging.handlers
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 import json
 import os
 import random
 import io
 import base64
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 from aiogram import Bot, Dispatcher, F, Router, types
@@ -33,10 +33,11 @@ from fastapi.staticfiles import StaticFiles
 from gtts import gTTS
 from croniter import croniter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pydantic import BaseModel, Field # Імпортуємо BaseModel та Field з pydantic
 
 # Імпорт ваших локальних модулів
 import web_parser
-from database import get_db_pool
+from database import get_db_pool, get_all_active_sources # Імпортуємо get_all_active_sources з database
 
 # Завантаження змінних середовища з .env файлу
 load_dotenv()
@@ -86,29 +87,63 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
         return api_key
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
 
-# Моделі даних
-class News(dict):
-    """Проста модель для новин."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__dict__ = self
+# Моделі даних Pydantic
+class User(BaseModel):
+    id: Optional[int] = None
+    telegram_id: int
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_admin: bool = False
+    last_active: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    language: str = 'uk'
+    auto_notifications: bool = False
+    digest_frequency: str = 'daily'
+    safe_mode: bool = False
+    current_feed_id: Optional[int] = None
+    is_premium: bool = False
+    premium_expires_at: Optional[datetime] = None
+    level: int = 1
+    badges: List[str] = Field(default_factory=list)
+    inviter_id: Optional[int] = None
+    view_mode: str = 'detailed'
+    premium_invite_count: int = 0
+    digest_invite_count: int = 0
+    is_pro: bool = False
+    ai_requests_today: int = 0
+    ai_last_request_date: date = Field(default_factory=date.today)
+    preferred_language: str = 'uk'
 
-class Source(dict):
-    """Проста модель для джерел."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__dict__ = self
+class Source(BaseModel):
+    id: Optional[int] = None
+    user_id: Optional[int] = None
+    source_type: str
+    feed_url: Optional[str] = None
+    name: str
+    last_parsed_at: Optional[datetime] = None
+    status: str = 'active'
+    error_message: Optional[str] = None
+    parser_config: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_public: bool = False
+    language: str = 'uk'
+    parse_interval_minutes: int = 60
 
-class User(dict):
-    """Модель для користувачів."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__dict__ = self
-
-# Стан для вибору мови
-class UserSettings(StatesGroup):
-    choosing_language = State()
-    waiting_for_term = State() # Новий стан для AI-аналітика
+class News(BaseModel):
+    id: Optional[int] = None
+    source_id: int
+    title: str
+    content: Optional[str] = None
+    source_url: str
+    normalized_source_url: str
+    image_url: Optional[str] = None
+    published_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    moderation_status: str = 'pending'
+    expires_at: Optional[datetime] = None
+    is_published_to_channel: bool = False
+    ai_classified_topics: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # --- Функції для роботи з базою даних ---
 
@@ -146,6 +181,27 @@ async def update_user_language(telegram_id: int, lang_code: str):
         async with conn.cursor() as cur:
             await cur.execute("UPDATE users SET preferred_language = %s WHERE telegram_id = %s", (lang_code, telegram_id))
             logger.info(f"Користувач {telegram_id} встановив мову: {lang_code}")
+
+async def update_user_ai_requests(telegram_id: int, increment: int = 1):
+    """Оновлює лічильник AI-запитів користувача."""
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE users SET ai_requests_today = ai_requests_today + %s WHERE telegram_id = %s",
+                (increment, telegram_id)
+            )
+
+async def reset_all_ai_requests_daily():
+    """Скидає лічильник AI-запитів для всіх користувачів щодня."""
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # Скидаємо лічильник, якщо дата останнього запиту не сьогодні
+            await cur.execute(
+                "UPDATE users SET ai_requests_today = 0, ai_last_request_date = CURRENT_DATE WHERE ai_last_request_date < CURRENT_DATE;"
+            )
+            logger.info(f"Скинуто лічильник AI-запитів для {cur.rowcount} користувачів.")
 
 async def get_news_from_db(news_id: int) -> Optional[News]:
     """Отримує новину з бази даних за ID."""
@@ -189,12 +245,15 @@ async def update_news_in_db(news_id: int, news_data: Dict[str, Any]) -> Optional
             update_fields = []
             update_values = []
             for key, value in news_data.items():
-                if key in ["title", "content", "source_id", "source_url", "normalized_source_url",
-                           "image_url", "published_at", "moderation_status", "expires_at",
-                           "is_published_to_channel", "ai_classified_topics"]:
+                # Перевіряємо, чи поле існує в моделі News, щоб уникнути помилок
+                if key in News.model_fields:
                     update_fields.append(f"{key} = %s")
-                    if key == "ai_classified_topics":
-                        update_values.append(json.dumps(value)) # Зберігаємо як JSON рядок
+                    if isinstance(value, list) or isinstance(value, dict): # Для JSONB полів
+                        update_values.append(json.dumps(value))
+                    elif isinstance(value, datetime): # Для TIMESTAMP WITH TIME ZONE
+                        update_values.append(value)
+                    elif isinstance(value, date): # Для DATE
+                        update_values.append(value)
                     else:
                         update_values.append(value)
             
@@ -208,14 +267,6 @@ async def update_news_in_db(news_id: int, news_data: Dict[str, Any]) -> Optional
             updated_rec = await cur.fetchone()
             return News(**updated_rec) if updated_rec else None
 
-async def delete_news_from_db(news_id: int) -> bool:
-    """Видаляє новину з бази даних."""
-    pool = await get_db_pool()
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM news WHERE id = %s", (news_id,))
-            return cur.rowcount > 0
-
 async def add_news_to_db(news_data: Dict[str, Any]) -> Optional[News]:
     """Додає нову новину до бази даних."""
     pool = await get_db_pool()
@@ -226,28 +277,58 @@ async def add_news_to_db(news_data: Dict[str, Any]) -> Optional[News]:
             if not all(field in news_data for field in required_fields):
                 raise ValueError(f"Missing required fields: {required_fields}")
 
-            # Заповнення відсутніх полів значеннями за замовчуванням
-            news_data.setdefault("content", None)
-            news_data.setdefault("image_url", None)
-            news_data.setdefault("published_at", datetime.now(timezone.utc))
-            news_data.setdefault("moderation_status", "pending")
-            news_data.setdefault("expires_at", None)
-            news_data.setdefault("is_published_to_channel", False)
-            news_data.setdefault("ai_classified_topics", [])
+            # Перевірка, чи новина вже існує за normalized_source_url
+            normalized_url = news_data.get("normalized_source_url", news_data["source_url"])
+            await cur.execute("SELECT id FROM news WHERE normalized_source_url = %s", (normalized_url,))
+            existing_news = await cur.fetchone()
 
-            columns = ", ".join(news_data.keys())
-            placeholders = ", ".join(["%s"] * len(news_data))
-            values = list(news_data.values())
+            if existing_news:
+                logger.info(f"Новина з URL {normalized_url} вже існує, пропускаємо додавання.")
+                return None # Пропускаємо додавання, якщо новина вже є
 
-            # Перетворення JSONB полів на JSON-рядки
-            if "ai_classified_topics" in news_data:
-                idx = list(news_data.keys()).index("ai_classified_topics")
-                values[idx] = json.dumps(values[idx])
+            # Створюємо об'єкт News для валідації та встановлення значень за замовчуванням
+            try:
+                news_item = News(**news_data)
+            except Exception as e:
+                logger.error(f"Помилка валідації даних новини: {e}, Data: {news_data}")
+                raise
 
-            query = f"INSERT INTO news ({columns}) VALUES ({placeholders}) RETURNING *;"
+            columns = []
+            placeholders = []
+            values = []
+
+            for field_name, field_info in News.model_fields.items():
+                if field_name == 'id': # ID генерується базою даних
+                    continue
+                
+                value = getattr(news_item, field_name)
+                
+                # Обробка JSONB та datetime/date полів
+                if isinstance(value, (list, dict)):
+                    columns.append(field_name)
+                    placeholders.append("%s")
+                    values.append(json.dumps(value))
+                elif isinstance(value, (datetime, date)):
+                    columns.append(field_name)
+                    placeholders.append("%s")
+                    values.append(value)
+                else:
+                    columns.append(field_name)
+                    placeholders.append("%s")
+                    values.append(value)
+
+            query = f"INSERT INTO news ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) RETURNING *;"
             await cur.execute(query, tuple(values))
             new_rec = await cur.fetchone()
             return News(**new_rec) if new_rec else None
+
+async def delete_news_from_db(news_id: int) -> bool:
+    """Видаляє новину з бази даних."""
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM news WHERE id = %s", (news_id,))
+            return cur.rowcount > 0
 
 async def get_all_users() -> List[User]:
     """Отримує список усіх користувачів."""
@@ -277,26 +358,58 @@ async def get_all_news(limit: int = 100, offset: int = 0) -> List[News]:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") # Залиште порожнім, Canvas надасть його
 
-async def translate_text_gemini(text: str, target_language: str) -> Optional[str]:
+async def check_ai_request_limit(user: User) -> bool:
+    """Перевіряє, чи користувач перевищив ліміт AI-запитів."""
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT setting_value FROM bot_settings WHERE setting_key = %s;", ('MAX_AI_REQUESTS_PER_DAY',))
+            default_limit = int((await cur.fetchone())['setting_value'])
+
+            await cur.execute("SELECT setting_value FROM bot_settings WHERE setting_key = %s;", ('PREMIUM_MAX_AI_REQUESTS_PER_DAY',))
+            premium_limit = int((await cur.fetchone())['setting_value'])
+            
+            max_requests = premium_limit if user.is_premium else default_limit
+
+            if user.ai_last_request_date < date.today():
+                # Якщо останній запит був не сьогодні, скидаємо лічильник
+                await reset_all_ai_requests_daily() # Ця функція може бути викликана окремо для всіх
+                # Або оновити конкретного користувача тут, якщо потрібно більш точне скидання
+                await cur.execute("UPDATE users SET ai_requests_today = 0, ai_last_request_date = CURRENT_DATE WHERE telegram_id = %s;", (user.telegram_id,))
+                user.ai_requests_today = 0
+                user.ai_last_request_date = date.today()
+            
+            return user.ai_requests_today < max_requests
+
+async def translate_text_gemini(text: str, target_language: str, user_id: int) -> Optional[str]:
     """Перекладає текст за допомогою Gemini API."""
     if not text:
         return None
     
+    user = await get_user_by_telegram_id(user_id)
+    if not user:
+        logger.error(f"Користувач {user_id} не знайдений для перекладу.")
+        return None
+
+    if not await check_ai_request_limit(user):
+        return "Ви досягли добового ліміту AI-запитів. Будь ласка, спробуйте завтра або оновіть свій статус до преміум."
+    
     prompt = f"Переклади наступний текст на {target_language} мову, зберігаючи оригінальне форматування (наприклад, HTML-теги, якщо вони є). Тільки переклад, без додаткових коментарів:\n\n{text}"
     
     chat_history = []
-    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] }) # Виправлено .push на .append
+    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] })
     payload = { "contents": chat_history }
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     try:
         async with ClientSession() as session:
-            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response: # Виправлено apiUrl на api_url
+            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response:
                 response.raise_for_status()
                 result = await response.json()
                 
                 if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0]["content"].get("parts"):
+                    await update_user_ai_requests(user_id) # Збільшуємо лічильник запитів
                     return result["candidates"][0]["content"]["parts"][0]["text"]
                 else:
                     logger.error(f"Неочікувана структура відповіді від Gemini API: {result}")
@@ -305,26 +418,35 @@ async def translate_text_gemini(text: str, target_language: str) -> Optional[str
         logger.error(f"Помилка під час виклику Gemini API для перекладу: {e}", exc_info=True)
         return None
 
-async def explain_term_gemini(term: str) -> Optional[str]:
+async def explain_term_gemini(term: str, user_id: int) -> Optional[str]:
     """Пояснює термін за допомогою Gemini API."""
     if not term:
         return "Будь ласка, введіть термін для пояснення."
     
+    user = await get_user_by_telegram_id(user_id)
+    if not user:
+        logger.error(f"Користувач {user_id} не знайдений для пояснення терміна.")
+        return "Виникла внутрішня помилка. Будь ласка, спробуйте пізніше."
+
+    if not await check_ai_request_limit(user):
+        return "Ви досягли добового ліміту AI-запитів. Будь ласка, спробуйте завтра або оновіть свій статус до преміум."
+    
     prompt = f"Будь ласка, поясніть термін або поняття '{term}' простою та зрозумілою мовою, надаючи ключові визначення та, можливо, короткий приклад. Відповідь має бути українською."
     
     chat_history = []
-    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] }) # Виправлено .push на .append
+    chat_history.append({ "role": "user", "parts": [{ "text": prompt }] })
     payload = { "contents": chat_history }
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     try:
         async with ClientSession() as session:
-            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response: # Виправлено apiUrl на api_url
+            async with session.post(api_url, headers={'Content-Type': 'application/json'}, json=payload) as response:
                 response.raise_for_status()
                 result = await response.json()
                 
                 if result.get("candidates") and result["candidates"][0].get("content") and result["candidates"][0]["content"].get("parts"):
+                    await update_user_ai_requests(user_id) # Збільшуємо лічильник запитів
                     return result["candidates"][0]["content"]["parts"][0]["text"]
                 else:
                     logger.error(f"Неочікувана структура відповіді від Gemini API для пояснення терміна: {result}")
@@ -391,7 +513,7 @@ async def get_latest_news_handler(callback_or_message: Union[Message, CallbackQu
     """
     Обробник для отримання останніх новин.
     """
-    user_id = callback_or_message.from_user.id
+    user_id = callback_or_user.from_user.id
     await update_user_last_active(user_id)
 
     # Приклад: Отримати 1 останню новину з бази даних
@@ -399,13 +521,13 @@ async def get_latest_news_handler(callback_or_message: Union[Message, CallbackQu
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT * FROM news ORDER BY published_at DESC LIMIT 1;")
-            news_item = await cur.fetchone()
+            news_item_data = await cur.fetchone()
 
-    if news_item:
-        news_item = News(**news_item) # Перетворюємо на об'єкт News
-        title = news_item.get("title", "Без заголовка")
-        source_url = news_item.get("source_url", "#")
-        content_snippet = news_item.get("content", "Немає вмісту.")
+    if news_item_data:
+        news_item = News(**news_item_data) # Перетворюємо на об'єкт News
+        title = news_item.title or "Без заголовка"
+        source_url = news_item.source_url or "#"
+        content_snippet = news_item.content or "Немає вмісту."
         if content_snippet and len(content_snippet) > 500: # Обмеження до 500 символів
             content_snippet = content_snippet[:500] + "..."
         
@@ -414,7 +536,7 @@ async def get_latest_news_handler(callback_or_message: Union[Message, CallbackQu
         builder = InlineKeyboardBuilder()
         builder.row(types.InlineKeyboardButton(text="🔗 Читати далі", url=source_url))
         builder.row(types.InlineKeyboardButton(text="🔁 Отримати наступну новину", callback_data="get_latest_news"))
-        builder.row(types.InlineKeyboardButton(text="🌐 Перекласти", callback_data=f"translate_news_{news_item['id']}"))
+        builder.row(types.InlineKeyboardButton(text="🌐 Перекласти", callback_data=f"translate_news_{news_item.id}"))
 
 
         if isinstance(callback_or_message, Message):
@@ -425,16 +547,16 @@ async def get_latest_news_handler(callback_or_message: Union[Message, CallbackQu
             send_func = callback_or_message.message.answer
             send_photo_func = callback_or_message.message.answer_photo
 
-        if news_item.get("image_url"):
+        if news_item.image_url:
             try:
                 await send_photo_func(
-                    photo=news_item["image_url"],
+                    photo=news_item.image_url,
                     caption=response_text,
                     parse_mode=ParseMode.HTML,
                     reply_markup=builder.as_markup()
                 )
             except Exception as e:
-                logger.warning(f"Не вдалося відправити фото для новини {news_item['id']}: {e}. Відправляю текст.")
+                logger.warning(f"Не вдалося відправити фото для новини {news_item.id}: {e}. Відправляю текст.")
                 await send_func(response_text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
         else:
             await send_func(response_text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
@@ -447,28 +569,28 @@ async def get_latest_news_handler(callback_or_message: Union[Message, CallbackQu
 @router.callback_query(F.data.startswith("translate_news_"))
 async def translate_news_callback_handler(callback: CallbackQuery):
     """Обробляє запит на переклад новини."""
-    await callback.answer("Перекладаю новину...", show_alert=False)
-    news_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
+    await callback.answer("Зачекайте, AI обробляє ваш запит...", show_alert=False) # Повідомлення про завантаження
     
     user = await get_user_by_telegram_id(user_id)
-    if not user or not user.get("preferred_language"):
+    if not user or not user.preferred_language:
         await callback.message.answer("Будь ласка, спочатку оберіть мову перекладу в налаштуваннях.")
         return
 
+    news_id = int(callback.data.split("_")[2])
     news_item = await get_news_from_db(news_id)
-    if not news_item or not news_item.get("content"):
+    if not news_item or not news_item.content:
         await callback.message.answer("Не вдалося знайти новину або її вміст для перекладу.")
         return
 
-    target_language = user["preferred_language"]
+    target_language = user.preferred_language
     
     # Виклик Gemini API для перекладу
-    translated_content = await translate_text_gemini(news_item["content"], target_language)
+    translated_content = await translate_text_gemini(news_item.content, target_language, user_id)
 
-    if translated_content:
-        title = news_item.get("title", "Без заголовка")
-        source_url = news_item.get("source_url", "#")
+    if translated_content and "Ви досягли добового ліміту" not in translated_content:
+        title = news_item.title or "Без заголовка"
+        source_url = news_item.source_url or "#"
         
         response_text = f"<b>{hlink(title, source_url)}</b> (переклад на {target_language})\n\n{translated_content}"
         
@@ -481,7 +603,7 @@ async def translate_news_callback_handler(callback: CallbackQuery):
         
         await callback.message.answer(response_text, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
     else:
-        await callback.message.answer("На жаль, не вдалося перекласти новину. Спробуйте пізніше.")
+        await callback.message.answer(translated_content if "Ви досягли добового ліміту" in translated_content else "На жаль, не вдалося перекласти новину. Спробуйте пізніше.")
 
 
 @router.callback_query(F.data == "translation_settings")
@@ -531,13 +653,14 @@ async def explain_term_command_handler(callback_or_message: Union[Message, Callb
 @router.message(UserSettings.waiting_for_term)
 async def process_term_for_explanation(message: Message, state: FSMContext):
     """Обробляє термін, введений користувачем, і викликає AI для пояснення."""
+    user_id = message.from_user.id
     term = message.text.strip()
     if not term:
         await message.answer("Ви не ввели термін. Будь ласка, спробуйте ще раз.")
         return
 
-    await message.answer(f"Шукаю пояснення для '{term}'...")
-    explanation = await explain_term_gemini(term)
+    await message.answer(f"Шукаю пояснення для '{term}'... Зачекайте, AI обробляє ваш запит...") # Повідомлення про завантаження
+    explanation = await explain_term_gemini(term, user_id)
     
     await message.answer(explanation, parse_mode=ParseMode.HTML)
     await state.clear()
@@ -578,17 +701,23 @@ async def donate_handler(callback_or_message: Union[Message, CallbackQuery]):
 
 # --- Background tasks (APScheduler) ---
 
-async def parse_active_sources():
+async def parse_active_sources_job():
     """
     Фонова задача для парсингу активних джерел новин.
     """
     logger.info("Запуск фонового завдання: parse_active_sources")
-    active_sources = await get_all_active_sources()
+    active_sources_data = await get_all_active_sources() # Використовуємо функцію з database.py
+    active_sources = [Source(**s) for s in active_sources_data] # Перетворюємо на Pydantic моделі
+
     for source in active_sources:
-        source_id = source["id"]
-        source_url = source["feed_url"] # Припускаємо, що feed_url є основним URL для парсингу
-        source_type = source["source_type"]
+        source_id = source.id
+        source_url = source.feed_url # Припускаємо, що feed_url є основним URL для парсингу
+        source_type = source.source_type
         
+        if not source_url:
+            logger.warning(f"Джерело {source_id} ({source.name}) не має feed_url, пропускаємо парсинг.")
+            continue
+
         logger.info(f"Парсинг джерела {source_id} ({source_type}): {source_url}")
         
         parsed_data = None
@@ -604,40 +733,28 @@ async def parse_active_sources():
 
         if parsed_data:
             try:
-                # Перевіряємо, чи новина вже існує за normalized_source_url
-                pool = await get_db_pool()
-                async with pool.connection() as conn:
-                    async with conn.cursor(row_factory=dict_row) as cur:
-                        normalized_url = parsed_data.get("normalized_source_url", parsed_data["source_url"])
-                        await cur.execute("SELECT id FROM news WHERE normalized_source_url = %s", (normalized_url,))
-                        existing_news = await cur.fetchone()
-
-                        if existing_news:
-                            logger.info(f"Новина з URL {normalized_url} вже існує, оновлюємо.")
-                            # Оновлення існуючої новини, якщо потрібно
-                            # await update_news_in_db(existing_news["id"], parsed_data)
-                        else:
-                            # Додаємо нову новину
-                            parsed_data["source_id"] = source_id
-                            parsed_data["normalized_source_url"] = parsed_data.get("normalized_source_url", parsed_data["source_url"])
-                            new_news = await add_news_to_db(parsed_data)
-                            if new_news:
-                                logger.info(f"Додано нову новину: {new_news['title']} (ID: {new_news['id']})")
-                                # Оповіщення адміна про нову новину (приклад)
-                                if ADMIN_TELEGRAM_ID:
-                                    try:
-                                        await bot.send_message(
-                                            chat_id=ADMIN_TELEGRAM_ID,
-                                            text=f"Нова новина додана: {hlink(new_news['title'], new_news['source_url'])}"
-                                        )
-                                    except Exception as e:
-                                        logger.error(f"Помилка при відправці сповіщення адміну: {e}")
+                # Додаємо нову новину (функція add_news_to_db тепер обробляє дублікати)
+                parsed_data["source_id"] = source_id
+                # normalized_source_url вже має бути в parsed_data з web_parser
+                new_news = await add_news_to_db(parsed_data)
+                
+                if new_news:
+                    logger.info(f"Додано нову новину: {new_news.title} (ID: {new_news.id})")
+                    # Оповіщення адміна про нову новину (приклад)
+                    if ADMIN_TELEGRAM_ID:
+                        try:
+                            await bot.send_message(
+                                chat_id=ADMIN_TELEGRAM_ID,
+                                text=f"Нова новина додана: {hlink(new_news.title, new_news.source_url)}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Помилка при відправці сповіщення адміну: {e}")
             except Exception as e:
                 logger.error(f"Помилка при збереженні новини з {source_url} в БД: {e}", exc_info=True)
         else:
             logger.warning(f"Не вдалося розпарсити дані з джерела {source_id}: {source_url}")
 
-async def publish_news_to_channel():
+async def publish_news_to_channel_job():
     """
     Фонова задача для публікації новин в Telegram-канал.
     """
@@ -649,19 +766,19 @@ async def publish_news_to_channel():
     news_item = await get_random_unmoderated_news()
 
     if news_item:
-        title = news_item.get("title", "Без заголовка")
-        source_url = news_item.get("source_url", "#")
-        content_snippet = news_item.get("content", "Немає вмісту.")
+        title = news_item.title or "Без заголовка"
+        source_url = news_item.source_url or "#"
+        content_snippet = news_item.content or "Немає вмісту."
         if content_snippet and len(content_snippet) > 500:
             content_snippet = content_snippet[:500] + "..."
         
         message_text = f"<b>{hlink(title, source_url)}</b>\n\n{content_snippet}"
 
         try:
-            if news_item.get("image_url"):
+            if news_item.image_url:
                 await bot.send_photo(
                     chat_id=CHANNEL_ID,
-                    photo=news_item["image_url"],
+                    photo=news_item.image_url,
                     caption=message_text,
                     parse_mode=ParseMode.HTML
                 )
@@ -671,10 +788,10 @@ async def publish_news_to_channel():
                     text=message_text,
                     parse_mode=ParseMode.HTML
                 )
-            await mark_news_as_published(news_item["id"])
-            logger.info(f"Новина {news_item['id']} опублікована в канал.")
+            await mark_news_as_published(news_item.id)
+            logger.info(f"Новина {news_item.id} опублікована в канал.")
         except Exception as e:
-            logger.error(f"Помилка при публікації новини {news_item['id']} в канал: {e}", exc_info=True)
+            logger.error(f"Помилка при публікації новини {news_item.id} в канал: {e}", exc_info=True)
     else:
         logger.info("Немає новин для публікації в канал.")
 
@@ -700,15 +817,19 @@ async def on_startup():
     logger.info("APScheduler запущено.")
 
     # Додаємо завдання для парсингу джерел (кожні 15 хвилин)
-    scheduler.add_job(parse_active_sources, 'interval', minutes=15, id='parse_sources_job')
-    logger.info("Завдання 'parse_active_sources' додано до планувальника.")
+    scheduler.add_job(parse_active_sources_job, 'interval', minutes=15, id='parse_sources_job')
+    logger.info("Завдання 'parse_active_sources_job' додано до планувальника.")
 
     # Додаємо завдання для публікації новин в канал (кожні 5 хвилин)
     if CHANNEL_ID:
-        scheduler.add_job(publish_news_to_channel, 'interval', minutes=5, id='publish_news_job')
-        logger.info("Завдання 'publish_news_to_channel' додано до планувальника.")
+        scheduler.add_job(publish_news_to_channel_job, 'interval', minutes=5, id='publish_news_job')
+        logger.info("Завдання 'publish_news_to_channel_job' додано до планувальника.")
     else:
         logger.warning("CHANNEL_ID не встановлено, завдання публікації новин не буде додано.")
+    
+    # Додаємо завдання для щоденного скидання лічильника AI-запитів (о 00:00 щодня)
+    scheduler.add_job(reset_all_ai_requests_daily, 'cron', hour=0, minute=0, id='reset_ai_requests_job')
+    logger.info("Завдання 'reset_ai_requests_job' додано до планувальника (щоденне скидання AI-запитів).")
 
     # Запускаємо Telegram бота
     asyncio.create_task(dp.start_polling(bot))
@@ -820,11 +941,12 @@ async def admin_users(request: Request):
     for user in users:
         users_html += f"""
         <li>
-            <b>ID:</b> {user.get('telegram_id')} (TG: {user.get('username') or 'N/A'}) - 
-            <b>Ім'я:</b> {user.get('first_name')} {user.get('last_name') or ''} - 
-            <b>Адмін:</b> {user.get('is_admin')} - 
-            <b>Мова:</b> {user.get('preferred_language', 'uk')} - 
-            <b>Преміум:</b> {user.get('is_premium')}
+            <b>ID:</b> {user.telegram_id} (TG: {user.username or 'N/A'}) - 
+            <b>Ім'я:</b> {user.first_name} {user.last_name or ''} - 
+            <b>Адмін:</b> {user.is_admin} - 
+            <b>Мова:</b> {user.preferred_language} - 
+            <b>Преміум:</b> {user.is_premium} -
+            <b>AI Запитів сьогодні:</b> {user.ai_requests_today}
         </li>
         """
     return f"""
@@ -860,11 +982,11 @@ async def admin_sources(request: Request):
     for source in sources:
         sources_html += f"""
         <li>
-            <b>ID:</b> {source.get('id')} - 
-            <b>Назва:</b> {source.get('name')} - 
-            <b>Тип:</b> {source.get('source_type')} - 
-            <b>URL:</b> {source.get('feed_url')} - 
-            <b>Статус:</b> {source.get('status')}
+            <b>ID:</b> {source.id} - 
+            <b>Назва:</b> {source.name} - 
+            <b>Тип:</b> {source.source_type} - 
+            <b>URL:</b> {source.feed_url} - 
+            <b>Статус:</b> {source.status}
         </li>
         """
     return f"""
@@ -900,13 +1022,13 @@ async def admin_news(request: Request):
     for news in news_items:
         news_html += f"""
         <li>
-            <b>ID:</b> {news.get('id')} - 
-            <b>Заголовок:</b> {news.get('title', 'N/A')[:100]}... - 
-            <b>Джерело ID:</b> {news.get('source_id')} - 
-            <b>Статус:</b> {news.get('moderation_status')} - 
-            <b>Опубліковано:</b> {news.get('is_published_to_channel')}
+            <b>ID:</b> {news.id} - 
+            <b>Заголовок:</b> {news.title[:100]}... - 
+            <b>Джерело ID:</b> {news.source_id} - 
+            <b>Статус:</b> {news.moderation_status} - 
+            <b>Опубліковано:</b> {news.is_published_to_channel}
             <br>
-            <small>URL: <a href="{news.get('source_url')}" target="_blank">{news.get('source_url')}</a></small>
+            <small>URL: <a href="{news.source_url}" target="_blank">{news.source_url}</a></small>
         </li>
         """
     return f"""
@@ -944,3 +1066,4 @@ if __name__ == "__main__":
     # встановлені у вашому .env файлі.
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
