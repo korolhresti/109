@@ -68,6 +68,18 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=Pars
 dp = Dispatcher()
 router = Router()
 
+# Глобальний обробник помилок для диспетчера
+@dp.errors()
+async def errors_handler(exception: Exception, event: types.ErrorEvent):
+    logger.error(f"Error occurred in handler for update {event.update.update_id}: {exception}", exc_info=exception)
+    # Optionally, send a message to the admin about the error
+    # if ADMIN_TELEGRAM_ID != 0:
+    #     try:
+    #         await bot.send_message(ADMIN_TELEGRAM_ID, f"An error occurred in the bot: {exception}\nUpdate: {event.update.model_dump_json(indent=2)}")
+    #     except Exception as e:
+    #         logger.error(f"Failed to send error message to admin: {e}")
+
+
 # Визначення станів для FSM
 class UserSettings(StatesGroup):
     choosing_language = State()
@@ -119,8 +131,8 @@ class SourceManagement(StatesGroup):
     waiting_for_status = State()
     waiting_for_parse_interval = State()
     waiting_for_edit_id = State()
-    waiting_for_edit_field = State() # Added missing state
-    waiting_for_new_value = State()  # Added missing state
+    waiting_for_edit_field = State()
+    waiting_for_new_value = State()
     waiting_for_delete_id = State()
 
 class NewsDigest(StatesGroup):
