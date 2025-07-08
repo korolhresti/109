@@ -5,6 +5,7 @@ from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone # Added datetime and timezone import
+import json # Ensure json is imported for task_queue
 
 load_dotenv()
 
@@ -22,6 +23,10 @@ logger.addHandler(stream_handler)
 db_pool: Optional[AsyncConnectionPool] = None
 
 async def get_db_pool():
+    """
+    Ініціалізує та повертає пул з'єднань до бази даних.
+    Якщо пул вже існує, повертає існуючий.
+    """
     global db_pool
     if db_pool is None:
         if not DATABASE_URL:
@@ -29,6 +34,7 @@ async def get_db_pool():
             raise ValueError("DATABASE_URL environment variable is not set.")
         
         conninfo = DATABASE_URL
+        # Додаємо sslmode=require, якщо його немає, для безпечного з'єднання
         if "sslmode" not in conninfo:
             conninfo += "?sslmode=require"
 
@@ -38,8 +44,9 @@ async def get_db_pool():
                 min_size=1,
                 max_size=10,
                 open=psycopg.AsyncConnection.connect,
-                reconnect_timeout=30 # Add a reconnect timeout for resilience
+                reconnect_timeout=30 # Додаємо таймаут для відновлення з'єднання
             )
+            # Перевіряємо з'єднання
             async with db_pool.connection() as conn:
                 await conn.execute("SELECT 1")
             logger.info("DB pool initialized successfully.")
@@ -49,6 +56,9 @@ async def get_db_pool():
     return db_pool
 
 async def get_all_active_sources() -> List[Dict[str, Any]]:
+    """
+    Отримує всі активні джерела новин з бази даних.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -56,6 +66,9 @@ async def get_all_active_sources() -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def get_user_by_telegram_id(telegram_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує користувача за його Telegram ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -63,6 +76,9 @@ async def get_user_by_telegram_id(telegram_id: int) -> Optional[Dict[str, Any]]:
             return await cur.fetchone()
 
 async def update_user_field(telegram_id: int, field_name: str, value: Any):
+    """
+    Оновлює одне поле користувача за його Telegram ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -70,6 +86,9 @@ async def update_user_field(telegram_id: int, field_name: str, value: Any):
             await conn.commit()
 
 async def get_source_by_id(source_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує джерело за його ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -77,6 +96,9 @@ async def get_source_by_id(source_id: int) -> Optional[Dict[str, Any]]:
             return await cur.fetchone()
 
 async def add_news_item(source_id: int, title: str, content: str, source_url: str, image_url: Optional[str], published_at: Optional[datetime], lang: str) -> int:
+    """
+    Додає нову новину до бази даних.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -89,6 +111,9 @@ async def add_news_item(source_id: int, title: str, content: str, source_url: st
             return news_id
 
 async def get_news_by_source_id(source_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Отримує новини за ID джерела.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -96,6 +121,9 @@ async def get_news_by_source_id(source_id: int, limit: int = 10) -> List[Dict[st
             return await cur.fetchall()
 
 async def get_all_news(limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Отримує всі новини з бази даних.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -103,6 +131,9 @@ async def get_all_news(limit: int = 100) -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def get_user_bookmarks(user_id: int, news_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    Отримує закладки користувача.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -114,6 +145,9 @@ async def get_user_bookmarks(user_id: int, news_id: Optional[int] = None) -> Lis
                 return await cur.fetchall()
 
 async def add_bookmark(user_id: int, news_id: int) -> bool:
+    """
+    Додає закладку для користувача.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -126,6 +160,9 @@ async def add_bookmark(user_id: int, news_id: int) -> bool:
                 return False
 
 async def delete_bookmark(user_id: int, news_id: int) -> bool:
+    """
+    Видаляє закладку для користувача.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -135,6 +172,9 @@ async def delete_bookmark(user_id: int, news_id: int) -> bool:
             return deleted_rows > 0
 
 async def get_user_news_views(user_id: int, news_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує перегляди новин користувача.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -142,6 +182,9 @@ async def get_user_news_views(user_id: int, news_id: int) -> Optional[Dict[str, 
             return await cur.fetchone()
 
 async def add_user_news_view(user_id: int, news_id: int):
+    """
+    Додає запис про перегляд новини користувачем.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -153,6 +196,9 @@ async def add_user_news_view(user_id: int, news_id: int):
                 await conn.rollback()
 
 async def get_user_news_reactions(user_id: int, news_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує реакції користувача на новину.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -160,6 +206,9 @@ async def get_user_news_reactions(user_id: int, news_id: int) -> Optional[Dict[s
             return await cur.fetchone()
 
 async def add_user_news_reaction(user_id: int, news_id: int, reaction_type: Optional[str]):
+    """
+    Додає або оновлює реакцію користувача на новину.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -173,6 +222,9 @@ async def add_user_news_reaction(user_id: int, news_id: int, reaction_type: Opti
             await conn.commit()
 
 async def update_news_item(news_id: int, updates: Dict[str, Any]):
+    """
+    Оновлює поля новини за її ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -183,13 +235,31 @@ async def update_news_item(news_id: int, updates: Dict[str, Any]):
             await conn.commit()
 
 async def get_news_item_by_id(news_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує новину за її ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             await cur.execute("SELECT * FROM news WHERE id = %s;", (news_id,))
             return await cur.fetchone()
 
+async def delete_news_item_by_id(news_id: int) -> bool:
+    """
+    Видаляє новину за її ID.
+    """
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM news WHERE id = %s;", (news_id,))
+            deleted_rows = cur.rowcount
+            await conn.commit()
+            return deleted_rows > 0
+
 async def get_source_by_url(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Отримує джерело за його URL.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -197,6 +267,9 @@ async def get_source_by_url(url: str) -> Optional[Dict[str, Any]]:
             return await cur.fetchone()
 
 async def add_source(source_data: Dict[str, Any]) -> int:
+    """
+    Додає нове джерело до бази даних.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -209,6 +282,9 @@ async def add_source(source_data: Dict[str, Any]) -> int:
             return source_id
 
 async def update_source_status(source_id: int, updates: Dict[str, Any]):
+    """
+    Оновлює статус джерела.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -219,6 +295,9 @@ async def update_source_status(source_id: int, updates: Dict[str, Any]):
             await conn.commit()
 
 async def get_all_sources() -> List[Dict[str, Any]]:
+    """
+    Отримує всі джерела новин.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -226,6 +305,9 @@ async def get_all_sources() -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def get_bot_setting(setting_key: str) -> Optional[str]:
+    """
+    Отримує значення налаштування бота.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -234,6 +316,9 @@ async def get_bot_setting(setting_key: str) -> Optional[str]:
             return result['setting_value'] if result else None
 
 async def update_bot_setting(setting_key: str, setting_value: str):
+    """
+    Оновлює значення налаштування бота.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -244,6 +329,9 @@ async def update_bot_setting(setting_key: str, setting_value: str):
             await conn.commit()
 
 async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує користувача за його внутрішнім ID.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -251,6 +339,9 @@ async def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
             return await cur.fetchone()
 
 async def get_last_n_news(source_ids: Optional[List[int]] = None, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Отримує останні N новин (можна фільтрувати за джерелами).
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -261,6 +352,9 @@ async def get_last_n_news(source_ids: Optional[List[int]] = None, limit: int = 5
             return await cur.fetchall()
 
 async def update_source_last_parsed(source_id: int, parsed_at: datetime):
+    """
+    Оновлює час останнього парсингу для джерела.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -268,6 +362,9 @@ async def update_source_last_parsed(source_id: int, parsed_at: datetime):
             await conn.commit()
 
 async def get_news_for_digest(user_id: int, time_frame: str = 'daily') -> List[Dict[str, Any]]:
+    """
+    Отримує новини для дайджесту користувача за певний проміжок часу.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -290,6 +387,9 @@ async def get_news_for_digest(user_id: int, time_frame: str = 'daily') -> List[D
             return await cur.fetchall()
 
 async def get_tasks_by_status(status: str) -> List[Dict[str, Any]]:
+    """
+    Отримує завдання з черги за статусом.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -297,6 +397,9 @@ async def get_tasks_by_status(status: str) -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def update_task_status(task_id: int, status: str, error_message: Optional[str] = None):
+    """
+    Оновлює статус завдання в черзі.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -307,6 +410,9 @@ async def update_task_status(task_id: int, status: str, error_message: Optional[
             await conn.commit()
 
 async def add_task_to_queue(task_type: str, task_data: Dict[str, Any], scheduled_at: datetime) -> int:
+    """
+    Додає нове завдання до черги.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -319,6 +425,9 @@ async def add_task_to_queue(task_type: str, task_data: Dict[str, Any], scheduled
             return task_id
 
 async def get_all_users() -> List[Dict[str, Any]]:
+    """
+    Отримує всіх користувачів.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -326,6 +435,9 @@ async def get_all_users() -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def get_user_subscriptions(user_id: int, source_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    Отримує підписки користувача.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -337,6 +449,9 @@ async def get_user_subscriptions(user_id: int, source_id: Optional[int] = None) 
                 return await cur.fetchall()
 
 async def add_user_subscription(user_id: int, source_id: int) -> bool:
+    """
+    Додає підписку користувача на джерело.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -349,6 +464,9 @@ async def add_user_subscription(user_id: int, source_id: int) -> bool:
                 return False
 
 async def delete_user_subscription(user_id: int, source_id: int) -> bool:
+    """
+    Видаляє підписку користувача на джерело.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -358,6 +476,9 @@ async def delete_user_subscription(user_id: int, source_id: int) -> bool:
             return deleted_rows > 0
 
 async def get_all_subscribed_sources(user_id: int) -> List[Dict[str, Any]]:
+    """
+    Отримує всі джерела, на які підписаний користувач.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -373,6 +494,9 @@ async def get_all_subscribed_sources(user_id: int) -> List[Dict[str, Any]]:
             return await cur.fetchall()
 
 async def get_source_stats(source_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Отримує статистику для джерела.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -380,6 +504,9 @@ async def get_source_stats(source_id: int) -> Optional[Dict[str, Any]]:
             return await cur.fetchone()
 
 async def update_source_stats(source_id: int, news_count: int):
+    """
+    Оновлює статистику для джерела.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -390,6 +517,9 @@ async def update_source_stats(source_id: int, news_count: int):
             await conn.commit()
 
 async def delete_user(telegram_id: int) -> bool:
+    """
+    Видаляє користувача та всі пов'язані з ним дані.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -407,6 +537,9 @@ async def delete_user(telegram_id: int) -> bool:
             return False
 
 async def delete_source(source_id: int) -> bool:
+    """
+    Видаляє джерело та всі пов'язані з ним новини, підписки та статистику.
+    """
     pool = await get_db_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -435,4 +568,3 @@ if __name__ == "__main__":
             if db_pool:
                 await db_pool.close()
     asyncio.run(test_db_connection())
-

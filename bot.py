@@ -37,8 +37,8 @@ from croniter import croniter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import BaseModel, Field
 
-from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source
-from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY
+from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source, delete_news_item_by_id # Added delete_news_item_by_id
+from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY, NEWS_CHANNEL_ID
 import web_parser
 
 logger = logging.getLogger(__name__)
@@ -72,10 +72,6 @@ async def errors_handler(exception: Exception, event: types.ErrorEvent):
 
 class UserSettings(StatesGroup):
     choosing_language = State()
-    choosing_digest_frequency = State()
-    choosing_safe_mode = State()
-    choosing_view_mode = State()
-    choosing_notifications_setting = State()
     admin_panel = State()
     admin_add_source = State()
     admin_edit_source = State()
@@ -110,6 +106,17 @@ class UserSettings(StatesGroup):
     admin_select_message_language = State()
     admin_select_message_language_code = State()
     admin_select_message_language_confirm = State()
+    # New states for adding source via Telegram
+    add_source_url = State()
+    add_source_name = State()
+    add_source_category = State()
+    add_source_language = State()
+    add_source_status = State()
+    add_source_parse_interval = State()
+    # New states for AI Assistant
+    ai_assistant_main = State()
+    ai_generate_portnikov = State()
+    ai_generate_lipsits = State()
 
 
 class SourceManagement(StatesGroup):
@@ -194,21 +201,25 @@ async def scheduled_news_check():
                     )
                     logger.info(f"Added new news item from {source['name']}: {parsed_data['title']} (ID: {news_id})")
 
-                    subscribed_users = await get_all_users()
-                    for user in subscribed_users:
-                        user_subscriptions = await get_user_subscriptions(user['id'])
-                        subscribed_source_ids = {s['source_id'] for s in user_subscriptions}
-                        if user.get('auto_notifications') and source['id'] in subscribed_source_ids:
-                            try:
-                                notification_text = (
-                                    f"<b>Нова новина з {source['name']}!</b>\n\n"
-                                    f"<b>{parsed_data['title']}</b>\n"
-                                    f"{hlink('Читати далі', parsed_data['source_url'])}"
-                                )
-                                await bot.send_message(user['telegram_id'], notification_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-                                logger.info(f"Sent notification to user {user['telegram_id']}")
-                            except Exception as e:
-                                logger.error(f"Failed to send notification to user {user['telegram_id']}: {e}")
+                    if NEWS_CHANNEL_ID:
+                        try:
+                            channel_post_text = (
+                                f"<b>Нова новина з {source['name']}!</b>\n\n"
+                                f"<b>{parsed_data['title']}</b>\n"
+                                f"{hlink('Читати далі', parsed_data['source_url'])}"
+                            )
+                            if parsed_data.get('image_url'):
+                                await bot.send_photo(NEWS_CHANNEL_ID, photo=parsed_data['image_url'], caption=channel_post_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                            else:
+                                await bot.send_message(NEWS_CHANNEL_ID, channel_post_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                            logger.info(f"Sent news post to channel {NEWS_CHANNEL_ID}")
+                            
+                            # Delete news from DB after successful posting to channel
+                            await delete_news_item_by_id(news_id)
+                            logger.info(f"Deleted news item {news_id} from DB after posting to channel.")
+
+                        except Exception as e:
+                            logger.error(f"Failed to send news to channel {NEWS_CHANNEL_ID}: {e}")
                 else:
                     logger.info(f"News from {source['name']} already exists: {parsed_data['title']}")
             else:
@@ -228,21 +239,8 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
         message.from_user.last_name
     )
     kb = [
-        [
-            InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings"),
-            InlineKeyboardButton(text="📰 Моя стрічка", callback_data="my_feed")
-        ],
-        [
-            InlineKeyboardButton(text="🔖 Закладки", callback_data="bookmarks"),
-            InlineKeyboardButton(text="🔍 Пошук новин", callback_data="search_news")
-        ],
-        [
-            InlineKeyboardButton(text="🤖 AI Асистент", callback_data="ai_assistant"),
-            InlineKeyboardButton(text="🎁 Преміум", callback_data="premium")
-        ],
-        [
-            InlineKeyboardButton(text="ℹ️ Про бота", callback_data="about_bot")
-        ]
+        [InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings")],
+        [InlineKeyboardButton(text="🤖 AI Асистент", callback_data="ai_assistant")]
     ]
     if user.get('is_admin'):
         kb.append([InlineKeyboardButton(text="🛠️ Адмін-панель", callback_data="admin_panel")])
@@ -264,21 +262,8 @@ async def command_menu_handler(message: Message, state: FSMContext) -> None:
         message.from_user.last_name
     )
     kb = [
-        [
-            InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings"),
-            InlineKeyboardButton(text="📰 Моя стрічка", callback_data="my_feed")
-        ],
-        [
-            InlineKeyboardButton(text="🔖 Закладки", callback_data="bookmarks"),
-            InlineKeyboardButton(text="🔍 Пошук новин", callback_data="search_news")
-        ],
-        [
-            InlineKeyboardButton(text="🤖 AI Асистент", callback_data="ai_assistant"),
-            InlineKeyboardButton(text="🎁 Преміум", callback_data="premium")
-        ],
-        [
-            InlineKeyboardButton(text="ℹ️ Про бота", callback_data="about_bot")
-        ]
+        [InlineKeyboardButton(text="⚙️ Налаштування", callback_data="settings")],
+        [InlineKeyboardButton(text="🤖 AI Асистент", callback_data="ai_assistant")]
     ]
     if user.get('is_admin'):
         kb.append([InlineKeyboardButton(text="🛠️ Адмін-панель", callback_data="admin_panel")])
@@ -296,17 +281,11 @@ async def settings_callback_handler(callback: CallbackQuery, state: FSMContext):
         return
 
     lang_status = "✅" if user.get('preferred_language') == 'uk' else "🇺🇸"
-    notifications_status = "✅ Увімкнено" if user.get('auto_notifications') else "❌ Вимкнено"
-    digest_freq = user.get('digest_frequency', 'daily')
-    safe_mode_status = "✅ Увімкнено" if user.get('safe_mode') else "❌ Вимкнено"
-    view_mode_status = "Детальний" if user.get('view_mode') == 'detailed' else "Короткий"
 
     kb = [
         [InlineKeyboardButton(text=f"Мова новин: {lang_status}", callback_data="set_language")],
-        [InlineKeyboardButton(text=f"Авто-сповіщення: {notifications_status}", callback_data="toggle_notifications")],
-        [InlineKeyboardButton(text=f"Дайджест новин: {digest_freq.capitalize()}", callback_data="set_digest_frequency")],
-        [InlineKeyboardButton(text=f"Безпечний режим: {safe_mode_status}", callback_data="toggle_safe_mode")],
-        [InlineKeyboardButton(text=f"Режим перегляду: {view_mode_status}", callback_data="set_view_mode")],
+        [InlineKeyboardButton(text="➕ Додати джерело новин", callback_data="add_news_source_telegram")], # New button
+        [InlineKeyboardButton(text="📄 Список джерел новин", callback_data="list_news_sources_telegram")], # New button
         [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
     ]
     markup = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -333,338 +312,230 @@ async def process_language_choice(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await settings_callback_handler(callback, state)
 
-@router.callback_query(F.data == "toggle_notifications")
-async def toggle_notifications_callback_handler(callback: CallbackQuery, state: FSMContext):
-    user = await get_user_by_telegram_id(callback.from_user.id)
-    new_status = not user.get('auto_notifications', False)
-    await update_user_field(callback.from_user.id, 'auto_notifications', new_status)
-    status_text = "увімкнено" if new_status else "вимкнено"
-    await callback.answer(f"Авто-сповіщення {status_text}.", show_alert=True)
-    await settings_callback_handler(callback, state)
-
-@router.callback_query(F.data == "set_digest_frequency")
-async def set_digest_frequency_callback_handler(callback: CallbackQuery, state: FSMContext):
-    kb = [
-        [InlineKeyboardButton(text="Щоденно", callback_data="set_digest_daily")],
-        [InlineKeyboardButton(text="Щотижнево", callback_data="set_digest_weekly")],
-        [InlineKeyboardButton(text="Вимкнути", callback_data="set_digest_off")],
-        [InlineKeyboardButton(text="⬅️ Назад до налаштувань", callback_data="settings")]
-    ]
-    markup = InlineKeyboardMarkup(inline_keyboard=kb)
-    await callback.message.edit_text("Оберіть частоту дайджесту:", reply_markup=markup)
-    await state.set_state(UserSettings.choosing_digest_frequency)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("set_digest_"), UserSettings.choosing_digest_frequency)
-async def process_digest_frequency_choice(callback: CallbackQuery, state: FSMContext):
-    freq_code = callback.data.split("_")[2]
-    await update_user_field(callback.from_user.id, 'digest_frequency', freq_code)
-    await callback.answer(f"Частоту дайджесту встановлено на {freq_code}.", show_alert=True)
-    await state.clear()
-    await settings_callback_handler(callback, state)
-
-@router.callback_query(F.data == "toggle_safe_mode")
-async def toggle_safe_mode_callback_handler(callback: CallbackQuery, state: FSMContext):
-    user = await get_user_by_telegram_id(callback.from_user.id)
-    new_status = not user.get('safe_mode', False)
-    await update_user_field(callback.from_user.id, 'safe_mode', new_status)
-    status_text = "увімкнено" if new_status else "вимкнено"
-    await callback.answer(f"Безпечний режим {status_text}.", show_alert=True)
-    await settings_callback_handler(callback, state)
-
-@router.callback_query(F.data == "set_view_mode")
-async def set_view_mode_callback_handler(callback: CallbackQuery, state: FSMContext):
-    kb = [
-        [InlineKeyboardButton(text="Детальний", callback_data="set_view_detailed")],
-        [InlineKeyboardButton(text="Короткий", callback_data="set_view_short")],
-        [InlineKeyboardButton(text="⬅️ Назад до налаштувань", callback_data="settings")]
-    ]
-    markup = InlineKeyboardMarkup(inline_keyboard=kb)
-    await callback.message.edit_text("Оберіть режим перегляду новин:", reply_markup=markup)
-    await state.set_state(UserSettings.choosing_view_mode)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("set_view_"), UserSettings.choosing_view_mode)
-async def process_view_mode_choice(callback: CallbackQuery, state: FSMContext):
-    view_mode = callback.data.split("_")[2]
-    await update_user_field(callback.from_user.id, 'view_mode', view_mode)
-    await callback.answer(f"Режим перегляду встановлено на {view_mode}.", show_alert=True)
-    await state.clear()
-    await settings_callback_handler(callback, state)
-
-@router.callback_query(F.data == "my_feed")
-async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
-    user_id = callback.from_user.id
-    user = await get_user_by_telegram_id(user_id)
-    if not user:
-        await callback.answer("Користувача не знайдено.", show_alert=True)
-        return
-
-    subscribed_sources = await get_user_subscriptions(user['id'])
-    if not subscribed_sources:
-        kb = [[InlineKeyboardButton(text="Підписатися на джерела", callback_data="manage_subscriptions")],
-              [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
-        markup = InlineKeyboardMarkup(inline_keyboard=kb)
-        await callback.message.edit_text("Ви ще не підписані на жодне джерело. Будь ласка, підпишіться на джерела, щоб бачити новини у своїй стрічці.", reply_markup=markup)
-        await callback.answer()
-        return
-
-    source_ids = [s['source_id'] for s in subscribed_sources]
-    all_news = await get_last_n_news(source_ids=source_ids, limit=100)
-
-    if not all_news:
-        kb = [[InlineKeyboardButton(text="Підписатися на джерела", callback_data="manage_subscriptions")],
-              [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
-        markup = InlineKeyboardMarkup(inline_keyboard=kb)
-        await callback.message.edit_text("У вашій стрічці поки немає новин з підписаних джерел.", reply_markup=markup)
-        await callback.answer()
-        return
-
-    news_per_page = 5
-    total_pages = (len(all_news) + news_per_page - 1) // news_per_page
-    start_index = page * news_per_page
-    end_index = start_index + news_per_page
-    current_news_page = all_news[start_index:end_index]
-
-    if not current_news_page:
-        if page > 0:
-            await callback.answer("Це остання сторінка новин.", show_alert=True)
-            await my_feed_callback_handler(callback, page=page-1)
-        else:
-            kb = [[InlineKeyboardButton(text="Підписатися на джерела", callback_data="manage_subscriptions")],
-                  [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
-            markup = InlineKeyboardMarkup(inline_keyboard=kb)
-            await callback.message.edit_text("У вашій стрічці поки немає новин з підписаних джерел.", reply_markup=markup)
-            await callback.answer()
-        return
-
-    news_text = ""
-    for news_item in current_news_page:
-        title = news_item['title']
-        source_name = (await get_source_by_id(news_item['source_id']))['name']
-        published_at_utc = news_item['published_at']
-        published_at_str = published_at_utc.strftime("%d.%m.%Y %H:%M") if published_at_utc else "Невідомо"
-        news_url = news_item['source_url']
-        news_id = news_item['id']
-
-        views = await get_user_news_views(user['id'], news_id)
-        viewed_status = "👁️" if views else ""
-
-        is_bookmarked = await get_user_bookmarks(user['id'], news_id)
-        bookmark_status = "🔖" if is_bookmarked else "🗃️"
-
-        reactions = await get_user_news_reactions(user['id'], news_id)
-        like_status = "👍" if reactions and reactions.get('reaction_type') == 'like' else "🤍"
-        dislike_status = "👎" if reactions and reactions.get('reaction_type') == 'dislike' else "🖤"
-
-        if user.get('view_mode') == 'detailed':
-            news_text += (
-                f"<b>{title}</b>\n"
-                f"Джерело: {source_name}\n"
-                f"Опубліковано: {published_at_str} UTC\n"
-                f"{viewed_status} {hlink('Читати далі', news_url)}\n"
-                f"Реакції: {like_status} {dislike_status} | {bookmark_status} | <a href='{WEB_APP_URL}/news/{news_id}'>Детальніше</a>\n\n"
-            )
-        else:
-            news_text += (
-                f"<b>{title}</b>\n"
-                f"{source_name} | {published_at_str} UTC | {viewed_status} {hlink('Читати', news_url)}\n"
-                f"Реакції: {like_status} {dislike_status} | {bookmark_status} | /news_{news_id}\n\n"
-            )
-
-        await add_user_news_view(user['id'], news_id)
-
-    pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"my_feed_page_{page-1}"))
-    if page < total_pages - 1:
-        pagination_buttons.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"my_feed_page_{page+1}"))
-
-    kb = [
-        pagination_buttons,
-        [InlineKeyboardButton(text="➕ Керувати підписками", callback_data="manage_subscriptions")],
-        [InlineKeyboardButton(text="🔄 Оновити стрічку", callback_data="my_feed_page_0")],
-        [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-    ]
-    markup = InlineKeyboardMarkup(inline_keyboard=kb)
-
-    await callback.message.edit_text(news_text, reply_markup=markup, disable_web_page_preview=True)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("my_feed_page_"))
-async def my_feed_pagination_handler(callback: CallbackQuery):
-    page = int(callback.data.split("_")[3])
-    await my_feed_callback_handler(callback, page=page)
-
-@router.callback_query(F.data == "manage_subscriptions")
-async def manage_subscriptions_callback_handler(callback: CallbackQuery, page: int = 0):
-    user_id = callback.from_user.id
-    all_sources = await get_all_active_sources()
-    user_subscriptions = await get_user_subscriptions(user_id)
-    subscribed_source_ids = {s['source_id'] for s in user_subscriptions}
-
-    if not all_sources:
-        kb = [[InlineKeyboardButton(text="⬅️ Назад до стрічки", callback_data="my_feed_page_0")],
-              [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
-        markup = InlineKeyboardMarkup(inline_keyboard=kb)
-        await callback.message.edit_text("Наразі немає доступних джерел для підписки.", reply_markup=markup)
-        await callback.answer()
-        return
-
-    sources_per_page = 5
-    total_pages = (len(all_sources) + sources_per_page - 1) // sources_per_page
-    start_index = page * sources_per_page
-    end_index = start_index + sources_per_page
-    current_sources_page = all_sources[start_index:end_index]
-
-    kb = []
-    for source in current_sources_page:
-        status = "✅ Підписано" if source['id'] in subscribed_source_ids else "➕ Підписатися"
-        callback_data = f"toggle_sub_{source['id']}"
-        kb.append([InlineKeyboardButton(text=f"{source['name']} ({source['category']}) - {status}", callback_data=callback_data)])
-
-    pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"manage_subscriptions_page_{page-1}"))
-    if page < total_pages - 1:
-        pagination_buttons.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"manage_subscriptions_page_{page+1}"))
-
-    kb.append(pagination_buttons)
-    kb.append([InlineKeyboardButton(text="⬅️ Назад до стрічки", callback_data="my_feed_page_0")])
-    kb.append([InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")])
-
-    markup = InlineKeyboardMarkup(inline_keyboard=kb)
-    await callback.message.edit_text("Керування підписками на джерела:", reply_markup=markup)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("manage_subscriptions_page_"))
-async def manage_subscriptions_pagination_handler(callback: CallbackQuery):
-    page = int(callback.data.split("_")[3])
-    await manage_subscriptions_callback_handler(callback, page=page)
-
-@router.callback_query(F.data.startswith("toggle_sub_"))
-async def toggle_subscription_callback_handler(callback: CallbackQuery, state: FSMContext):
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    source_id = int(callback.data.split("_")[2])
-
-    is_subscribed = await get_user_subscriptions(user_id, source_id)
-
-    if is_subscribed:
-        await delete_user_subscription(user_id, source_id)
-        await callback.answer("Ви відписалися від джерела.", show_alert=True)
-    else:
-        await add_user_subscription(user_id, source_id)
-        await callback.answer("Ви підписалися на джерело.", show_alert=True)
-
-    await manage_subscriptions_callback_handler(callback)
-
-@router.callback_query(F.data == "bookmarks")
-async def bookmarks_callback_handler(callback: CallbackQuery, page: int = 0):
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    user_bookmarks = await get_user_bookmarks(user_id)
-
-    if not user_bookmarks:
-        kb = [[InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
-        markup = InlineKeyboardMarkup(inline_keyboard=kb)
-        await callback.message.edit_text("У вас немає закладок.", reply_markup=markup)
-        await callback.answer()
-        return
-
-    news_per_page = 5
-    total_pages = (len(user_bookmarks) + news_per_page - 1) // news_per_page
-    start_index = page * news_per_page
-    end_index = start_index + news_per_page
-    current_bookmarks_page = user_bookmarks[start_index:end_index]
-
-    bookmarks_text = "Ваші закладки:\n\n"
-    for bookmark in current_bookmarks_page:
-        news_item = await get_news_item_by_id(bookmark['news_id'])
-        if news_item:
-            title = news_item['title']
-            source_name = (await get_source_by_id(news_item['source_id']))['name']
-            published_at_utc = news_item['published_at']
-            published_at_str = published_at_utc.strftime("%d.%m.%Y %H:%M") if published_at_utc else "Невідомо"
-            news_url = news_item['source_url']
-            news_id = news_item['id']
-
-            bookmarks_text += (
-                f"<b>{title}</b>\n"
-                f"Джерело: {source_name}\n"
-                f"Опубліковано: {published_at_str} UTC\n"
-                f"{hlink('Читати далі', news_url)}\n"
-                f"Видалити: /del_bookmark_{news_id}\n\n"
-            )
-
-    pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"bookmarks_page_{page-1}"))
-    if page < total_pages - 1:
-        pagination_buttons.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"bookmarks_page_{page+1}"))
-
-    kb = [
-        pagination_buttons,
-        [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-    ]
-    markup = InlineKeyboardMarkup(inline_keyboard=kb)
-
-    await callback.message.edit_text(bookmarks_text, reply_markup=markup, disable_web_page_preview=True)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("bookmarks_page_"))
-async def bookmarks_pagination_handler(callback: CallbackQuery):
-    page = int(callback.data.split("_")[2])
-    await bookmarks_callback_handler(callback, page=page)
-
-@router.message(Command(re.compile(r"del_bookmark_(\d+)")))
-async def delete_bookmark_command_handler(message: Message):
-    news_id = int(message.text.split("_")[2])
-    user_id = (await get_user_by_telegram_id(message.from_user.id))['id']
-
-    if await delete_bookmark(user_id, news_id):
-        await message.answer("Закладку видалено.")
-    else:
-        await message.answer("Ця новина не була у ваших закладках.")
-
-    await bookmarks_callback_handler(message)
-
-
-@router.callback_query(F.data == "search_news")
-async def search_news_callback_handler(callback: CallbackQuery):
-    await callback.message.edit_text("Наразі функція пошуку новин в розробці. Будь ласка, спробуйте пізніше.",
+# --- New handlers for adding source via Telegram ---
+@router.callback_query(F.data == "add_news_source_telegram")
+async def add_news_source_telegram_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Введіть URL нового джерела:",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                         [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
+                                         [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
                                      ]))
+    await state.set_state(UserSettings.add_source_url)
     await callback.answer()
+
+@router.message(UserSettings.add_source_url)
+async def process_telegram_source_url(message: Message, state: FSMContext):
+    url = message.text
+    parsed_url = urlparse(url)
+    if not all([parsed_url.scheme, parsed_url.netloc]):
+        await message.answer("Будь ласка, введіть дійсний URL (наприклад, https://example.com).",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                             ]))
+        return
+
+    existing_source = await get_source_by_url(url)
+    if existing_source:
+        await message.answer("Джерело з таким URL вже існує в базі даних.",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                             ]))
+        await state.clear()
+        return
+
+    await state.update_data(new_source_url=url)
+    await message.answer("Введіть назву джерела (наприклад, 'Європейська Правда'):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                         ]))
+    await state.set_state(UserSettings.add_source_name)
+
+@router.message(UserSettings.add_source_name)
+async def process_telegram_source_name(message: Message, state: FSMContext):
+    name = message.text
+    await state.update_data(new_source_name=name)
+    await message.answer("Введіть категорію джерела (наприклад, 'Політика', 'Економіка', 'Спорт'):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                         ]))
+    await state.set_state(UserSettings.add_source_category)
+
+@router.message(UserSettings.add_source_category)
+async def process_telegram_source_category(message: Message, state: FSMContext):
+    category = message.text
+    await state.update_data(new_source_category=category)
+    await message.answer("Введіть мову джерела (наприклад, 'uk', 'en'):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                         ]))
+    await state.set_state(UserSettings.add_source_language)
+
+@router.message(UserSettings.add_source_language)
+async def process_telegram_source_language(message: Message, state: FSMContext):
+    language = message.text
+    if language not in ['uk', 'en']:
+        await message.answer("Будь ласка, введіть 'uk' або 'en'.",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                             ]))
+        return
+
+    await state.update_data(new_source_language=language)
+    await message.answer("Введіть статус джерела ('active' або 'inactive'):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                         ]))
+    await state.set_state(UserSettings.add_source_status)
+
+@router.message(UserSettings.add_source_status)
+async def process_telegram_source_status(message: Message, state: FSMContext):
+    status = message.text.lower()
+    if status not in ['active', 'inactive']:
+        await message.answer("Будь ласка, введіть 'active' або 'inactive'.",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                             ]))
+        return
+
+    await state.update_data(new_source_status=status)
+    await message.answer("Введіть інтервал парсингу в хвилинах (наприклад, '60' для щогодини):",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                         ]))
+    await state.set_state(UserSettings.add_source_parse_interval)
+
+@router.message(UserSettings.add_source_parse_interval)
+async def process_telegram_source_parse_interval(message: Message, state: FSMContext):
+    try:
+        parse_interval = int(message.text)
+        if parse_interval <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Будь ласка, введіть дійсне число більше нуля.",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="settings")]
+                             ]))
+        return
+
+    data = await state.get_data()
+    new_source = {
+        "url": data['new_source_url'],
+        "name": data['new_source_name'],
+        "category": data['new_source_category'],
+        "language": data['new_source_language'],
+        "status": data['new_source_status'],
+        "parse_interval_minutes": parse_interval
+    }
+
+    source_id = await add_source(new_source)
+    await message.answer(f"Джерело '{new_source['name']}' (ID: {source_id}) успішно додано.",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="⬅️ Назад до налаштувань", callback_data="settings")]
+                         ]))
+    await state.clear()
+
+# --- New handler for listing sources via Telegram ---
+@router.callback_query(F.data == "list_news_sources_telegram")
+async def list_news_sources_telegram_handler(callback: CallbackQuery):
+    sources = await get_all_sources()
+    if not sources:
+        await callback.message.edit_text("Немає доданих джерел новин.",
+                                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                             [InlineKeyboardButton(text="⬅️ Назад до налаштувань", callback_data="settings")]
+                                         ]))
+        await callback.answer()
+        return
+
+    sources_list_text = "Список доданих джерел новин:\n\n"
+    for source in sources:
+        sources_list_text += (
+            f"ID: {source['id']}\n"
+            f"Назва: {source['name']}\n"
+            f"URL: {source['url']}\n"
+            f"Категорія: {source['category']}\n"
+            f"Мова: {source['language']}\n"
+            f"Статус: {source['status']}\n"
+            f"Інтервал парсингу: {source['parse_interval_minutes']} хв\n\n"
+        )
+
+    kb = [[InlineKeyboardButton(text="⬅️ Назад до налаштувань", callback_data="settings")]]
+    markup = InlineKeyboardMarkup(inline_keyboard=kb)
+    await callback.message.edit_text(sources_list_text, reply_markup=markup, disable_web_page_preview=True)
+    await callback.answer()
+
 
 @router.callback_query(F.data == "ai_assistant")
-async def ai_assistant_callback_handler(callback: CallbackQuery):
-    await callback.message.edit_text("Наразі AI Асистент в розробці. Будь ласка, спробуйте пізніше.",
-                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                         [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-                                     ]))
-    await callback.answer()
-
-@router.callback_query(F.data == "premium")
-async def premium_callback_handler(callback: CallbackQuery):
-    await callback.message.edit_text("Інформація про Преміум доступна незабаром. Слідкуйте за оновленнями!",
-                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                         [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-                                     ]))
-    await callback.answer()
-
-@router.callback_query(F.data == "about_bot")
-async def about_bot_callback_handler(callback: CallbackQuery):
-    about_text = (
-        "Цей бот створений для зручного отримання новин з різних джерел.\n"
-        "Розробник: [Ваше ім'я або нікнейм]\n"
-        "Версія: 1.0\n"
-        "Зворотний зв'язок: @your_support_handle (замініть на реальний)\n\n"
-        "Дякуємо за використання!"
-    )
-    await callback.message.edit_text(about_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+async def ai_assistant_callback_handler(callback: CallbackQuery, state: FSMContext):
+    kb = [
+        [InlineKeyboardButton(text="Згенерувати новину від Віталія Портнікова", callback_data="ai_portnikov")],
+        [InlineKeyboardButton(text="Згенерувати новину від Ігоря Ліпсіца", callback_data="ai_lipsits")],
         [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-    ]))
+    ]
+    markup = InlineKeyboardMarkup(inline_keyboard=kb)
+    await callback.message.edit_text("Оберіть тип генерації новини:", reply_markup=markup)
+    await state.set_state(UserSettings.ai_assistant_main)
     await callback.answer()
+
+async def generate_news_with_ai(prompt: str) -> str:
+    """
+    Calls the Gemini API to generate news based on the given prompt.
+    """
+    chatHistory = []
+    chatHistory.push({ "role": "user", "parts": [{ "text": prompt }] })
+    payload = { "contents": chatHistory }
+    apiKey = os.getenv("GEMINI_API_KEY", "") # Get API key from environment
+    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}"
+
+    try:
+        async with ClientSession() as session:
+            async with session.post(apiUrl, headers={'Content-Type': 'application/json'}, json=payload) as response:
+                response.raise_for_status() # Raise an exception for HTTP errors
+                result = await response.json()
+                if result.get('candidates') and result['candidates'][0].get('content') and result['candidates'][0]['content'].get('parts'):
+                    return result['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    logger.error(f"Unexpected API response structure: {result}")
+                    return "Не вдалося згенерувати новину. Неочікувана відповідь від AI."
+    except Exception as e:
+        logger.error(f"Error calling Gemini API: {e}")
+        return f"Виникла помилка при зверненні до AI: {e}"
+
+
+@router.callback_query(F.data == "ai_portnikov", UserSettings.ai_assistant_main)
+async def ai_portnikov_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Генерую новину в стилі Віталія Портнікова...",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                         [InlineKeyboardButton(text="⬅️ Назад до AI Асистента", callback_data="ai_assistant")]
+                                     ]))
+    await callback.answer()
+
+    prompt = "Згенеруй короткий аналітичний пост про поточну геополітичну ситуацію в Україні та світі у стилі Віталія Портнікова. Використовуй його характерну лексику та манеру викладу, фокусуючись на глибокому аналізі та прогнозах."
+    generated_text = await generate_news_with_ai(prompt)
+    
+    await callback.message.edit_text(f"<b>Новина від Віталія Портнікова:</b>\n\n{generated_text}",
+                                     parse_mode=ParseMode.HTML,
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                         [InlineKeyboardButton(text="⬅️ Назад до AI Асистента", callback_data="ai_assistant")]
+                                     ]))
+    await state.clear()
+
+@router.callback_query(F.data == "ai_lipsits", UserSettings.ai_assistant_main)
+async def ai_lipsits_handler(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Генерую новину в стилі Ігоря Ліпсіца...",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                         [InlineKeyboardButton(text="⬅️ Назад до AI Асистента", callback_data="ai_assistant")]
+                                     ]))
+    await callback.answer()
+
+    prompt = "Згенеруй короткий економічний огляд або прогноз щодо української економіки у стилі Ігоря Ліпсіца. Використовуй його характерну термінологію, приклади та аргументацію, орієнтуючись на практичні висновки."
+    generated_text = await generate_news_with_ai(prompt)
+
+    await callback.message.edit_text(f"<b>Новина від Ігоря Ліпсіца:</b>\n\n{generated_text}",
+                                     parse_mode=ParseMode.HTML,
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                         [InlineKeyboardButton(text="⬅️ Назад до AI Асистента", callback_data="ai_assistant")]
+                                     ]))
+    await state.clear()
+
 
 @router.callback_query(F.data == "admin_panel", is_admin_check)
 async def admin_panel_callback_handler(callback: CallbackQuery, state: FSMContext):
@@ -1469,119 +1340,6 @@ async def process_new_bot_setting_value(message: Message, state: FSMContext):
                          ]))
     await state.clear()
 
-@router.message(Command(re.compile(r"news_(\d+)")))
-async def show_detailed_news(message: Message, news_id: Optional[int] = None):
-    if news_id is None:
-        news_id = int(message.text.split("_")[1])
-
-    news_item = await get_news_item_by_id(news_id)
-
-    if not news_item:
-        await message.answer("Новину не знайдено.")
-        return
-
-    user_id = (await get_user_by_telegram_id(message.from_user.id))['id']
-
-    await add_user_news_view(user_id, news_id)
-
-    title = news_item['title']
-    content = news_item['content']
-    source_name = (await get_source_by_id(news_item['source_id']))['name']
-    published_at_utc = news_item['published_at']
-    published_at_str = published_at_utc.strftime("%d.%m.%Y %H:%M") if published_at_utc else "Невідомо"
-    image_url = news_item['image_url']
-    news_url = news_item['source_url']
-
-    is_bookmarked = await get_user_bookmarks(user_id, news_id)
-    bookmark_action = "add_bookmark" if not is_bookmarked else "remove_bookmark"
-    bookmark_text = "🔖 Додати в закладки" if not is_bookmarked else "🗑️ Видалити із закладок"
-
-    reactions = await get_user_news_reactions(user_id, news_id)
-    like_action = "like_news" if not (reactions and reactions.get('reaction_type') == 'like') else "unlike_news"
-    dislike_action = "dislike_news" if not (reactions and reactions.get('reaction_type') == 'dislike') else "undislike_news"
-    like_text = "👍 Подобається" if not (reactions and reactions.get('reaction_type') == 'like') else "👍 Видалити лайк"
-    dislike_text = "👎 Не подобається" if not (reactions and reactions.get('reaction_type') == 'dislike') else "👎 Видалити дизлайк"
-
-
-    response_text = (
-        f"<b>{title}</b>\n\n"
-        f"Джерело: {source_name}\n"
-        f"Опубліковано: {published_at_str} UTC\n\n"
-        f"{content}\n\n"
-        f"{hlink('Читати оригінал', news_url)}"
-    )
-
-    if image_url:
-        await message.answer_photo(photo=image_url, caption=response_text, parse_mode=ParseMode.HTML,
-                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                       [InlineKeyboardButton(text=bookmark_text, callback_data=f"{bookmark_action}_{news_id}")],
-                                       [InlineKeyboardButton(text=like_text, callback_data=f"{like_action}_{news_id}"),
-                                        InlineKeyboardButton(text=dislike_text, callback_data=f"{dislike_action}_{news_id}")],
-                                       [InlineKeyboardButton(text="⬅️ Назад до стрічки", callback_data="my_feed")],
-                                       [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-                                   ]))
-    else:
-        await message.answer(response_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [InlineKeyboardButton(text=bookmark_text, callback_data=f"{bookmark_action}_{news_id}")],
-                                 [InlineKeyboardButton(text=like_text, callback_data=f"{like_action}_{news_id}"),
-                                  InlineKeyboardButton(text=dislike_text, callback_data=f"{dislike_action}_{news_id}")],
-                                 [InlineKeyboardButton(text="⬅️ Назад до стрічки", callback_data="my_feed")],
-                                 [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
-                             ]))
-
-@router.callback_query(F.data.startswith("add_bookmark_"))
-async def add_bookmark_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    if await add_bookmark(user_id, news_id):
-        await callback.answer("Новину додано до закладок!", show_alert=True)
-    else:
-        await callback.answer("Новина вже є у ваших закладках.", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
-@router.callback_query(F.data.startswith("remove_bookmark_"))
-async def remove_bookmark_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    if await delete_bookmark(user_id, news_id):
-        await callback.answer("Новину видалено із закладок.", show_alert=True)
-    else:
-        await callback.answer("Цієї новини немає у ваших закладках.", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
-@router.callback_query(F.data.startswith("like_news_"))
-async def like_news_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, 'like')
-    await callback.answer("Вам сподобалася новина!", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
-@router.callback_query(F.data.startswith("unlike_news_"))
-async def unlike_news_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, None)
-    await callback.answer("Лайк видалено.", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
-@router.callback_query(F.data.startswith("dislike_news_"))
-async def dislike_news_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, 'dislike')
-    await callback.answer("Вам не сподобалася новина.", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
-@router.callback_query(F.data.startswith("undislike_news_"))
-async def undislike_news_handler(callback: CallbackQuery):
-    news_id = int(callback.data.split("_")[2])
-    user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, None)
-    await callback.answer("Дизлайк видалено.", show_alert=True)
-    await show_detailed_news(callback.message, news_id=news_id)
-
 
 @router.message()
 async def echo_handler(message: types.Message) -> None:
@@ -1660,6 +1418,25 @@ async def admin_panel_web(api_key: str = Depends(get_api_key)):
     for u in users:
         users_html += f"<li><b>{u['first_name']}</b> (TG ID: {u['telegram_id']}) - Admin: {u['is_admin']}</li>"
 
+    # Form for adding a new source
+    add_source_form = """
+    <h2>Додати нове джерело</h2>
+    <form action="/admin/add_source" method="post">
+        <label for="url">URL:</label><br>
+        <input type="text" id="url" name="url" size="50" required><br><br>
+        <label for="name">Назва:</label><br>
+        <input type="text" id="name" name="name" size="50" required><br><br>
+        <label for="category">Категорія:</label><br>
+        <input type="text" id="category" name="category" size="50" required><br><br>
+        <label for="language">Мова (uk/en):</label><br>
+        <input type="text" id="language" name="language" size="10" required><br><br>
+        <label for="status">Статус (active/inactive):</label><br>
+        <input type="text" id="status" name="status" size="10" required><br><br>
+        <label for="parse_interval_minutes">Інтервал парсингу (хвилини):</label><br>
+        <input type="number" id="parse_interval_minutes" name="parse_interval_minutes" required><br><br>
+        <input type="submit" value="Додати джерело">
+    </form>
+    """
 
     return f"""
     <!DOCTYPE html>
@@ -1675,6 +1452,11 @@ async def admin_panel_web(api_key: str = Depends(get_api_key)):
             li {{ margin-bottom: 8px; padding: 8px; border-bottom: 1px solid #eee; }}
             a {{ text-decoration: none; color: #3498db; }}
             a:hover {{ text-decoration: underline; }}
+            form {{ margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 8px; background-color: #f9f9f9; }}
+            form label {{ font-weight: bold; }}
+            form input[type="text"], form input[type="number"] {{ width: calc(100% - 20px); padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; }}
+            form input[type="submit"] {{ background-color: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
+            form input[type="submit"]:hover {{ background-color: #218838; }}
         </style>
     </head>
     <body>
@@ -1682,6 +1464,8 @@ async def admin_panel_web(api_key: str = Depends(get_api_key)):
             <h1>Адмін-панель</h1>
             <p>Ласкаво просимо до адмін-панелі. Тут ви можете керувати ботом.</p>
             
+            {add_source_form}
+
             <h2>Джерела новин</h2>
             <ul>{sources_html}</ul>
 
@@ -1694,81 +1478,117 @@ async def admin_panel_web(api_key: str = Depends(get_api_key)):
     </html>
     """
 
-@app.get("/news/{news_id}", response_class=HTMLResponse)
-async def get_news_detail(news_id: int):
-    news_item = await get_news_item_by_id(news_id)
-    if not news_item:
-        raise HTTPException(status_code=404, detail="News not found")
+class SourceCreate(BaseModel):
+    url: str
+    name: str
+    category: str
+    language: str
+    status: str
+    parse_interval_minutes: int
 
-    source = await get_source_by_id(news_item['source_id'])
-    source_name = source['name'] if source else "Невідоме джерело"
-    published_at_str = news_item['published_at'].strftime("%d.%m.%Y %H:%M") if news_item['published_at'] else "Невідомо"
+@app.post("/admin/add_source", response_class=HTMLResponse)
+async def add_source_web(source_data: SourceCreate, api_key: str = Depends(get_api_key)):
+    try:
+        # Validate data
+        if not all([source_data.url, source_data.name, source_data.category, source_data.language, source_data.status, source_data.parse_interval_minutes]):
+            raise HTTPException(status_code=400, detail="All fields are required.")
+        if source_data.language not in ['uk', 'en']:
+            raise HTTPException(status_code=400, detail="Language must be 'uk' or 'en'.")
+        if source_data.status not in ['active', 'inactive']:
+            raise HTTPException(status_code=400, detail="Status must be 'active' or 'inactive'.")
+        if source_data.parse_interval_minutes <= 0:
+            raise HTTPException(status_code=400, detail="Parse interval must be a positive number.")
 
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{news_item['title']}</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }}
-            .container {{ max-width: 800px; margin: 0 auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }}
-            h1 {{ color: #2c3e50; }}
-            .meta {{ color: #7f8c8d; font-size: 0.9em; margin-bottom: 15px; }}
-            .content {{ line-height: 1.6; }}
-            img {{ max-width: 100%; height: auto; display: block; margin: 15px 0; border-radius: 4px; }}
-            .back-link {{ display: block; margin-top: 20px; text-align: center; }}
-            a {{ text-decoration: none; color: #3498db; }}
-            a:hover {{ text-decoration: underline; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>{news_item['title']}</h1>
-            <p class="meta">Джерело: {source_name} | Опубліковано: {published_at_str} UTC</p>
-            {"<img src='" + news_item['image_url'] + "' alt='Зображення новини'>" if news_item['image_url'] else ""}
-            <div class="content">
-                <p>{news_item['content']}</p>
+        existing_source = await get_source_by_url(source_data.url)
+        if existing_source:
+            raise HTTPException(status_code=409, detail="Source with this URL already exists.")
+
+        source_id = await add_source(source_data.model_dump()) # Use model_dump() for Pydantic v2
+        
+        response_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Джерело додано</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; text-align: center; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }}
+                h1 {{ color: #28a745; }}
+                p {{ font-size: 1.1em; }}
+                a {{ text-decoration: none; color: #3498db; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Успіх!</h1>
+                <p>Джерело '{source_data.name}' (ID: {source_id}) успішно додано.</p>
+                <p><a href="/admin">Повернутися до адмін-панелі</a></p>
             </div>
-            <p class="back-link"><a href="{news_item['source_url']}" target="_blank">Читати оригінал</a></p>
-            <p class="back-link"><a href="/">Повернутися до головної</a></p>
-        </div>
-    </body>
-    </html>
-    """
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=response_content, status_code=200)
 
-@app.get("/news_digest", response_class=HTMLResponse)
-async def get_news_digest_web():
-    news_html = "<li>Наразі дайджест новин недоступний.</li>"
+    except HTTPException as e:
+        error_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Помилка</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; text-align: center; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }}
+                h1 {{ color: #dc3545; }}
+                p {{ font-size: 1.1em; }}
+                a {{ text-decoration: none; color: #3498db; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Помилка!</h1>
+                <p>Помилка при додаванні джерела: {e.detail}</p>
+                <p><a href="/admin">Повернутися до адмін-панелі</a></p>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_content, status_code=e.status_code)
+    except Exception as e:
+        logger.error(f"Error adding source via web: {e}", exc_info=True)
+        error_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Помилка</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; text-align: center; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }}
+                h1 {{ color: #dc3545; }}
+                p {{ font-size: 1.1em; }}
+                a {{ text-decoration: none; color: #3498db; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Помилка!</h1>
+                <p>Виникла невідома помилка при додаванні джерела.</p>
+                <p><a href="/admin">Повернутися до адмін-панелі</a></p>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_content, status_code=500)
 
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Новини</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }}
-            .container {{ max-width: 900px; margin: 0 auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }}
-            h1 {{ color: #2c3e50; }}
-            ul {{ list-style-type: none; padding: 0; }}
-            li {{ margin-bottom: 8px; padding: 8px; border-bottom: 1px solid #eee; }}
-            a {{ text-decoration: none; color: #3498db; }}
-            a:hover {{ text-decoration: underline; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Новини</h1>
-            <ul>{news_html}</ul>
-            <p><a href="/admin">Повернутися до адмін-панелі</a></p>
-        </div>
-    </body>
-    </html>
-    """
 
 if __name__ == "__main__":
     load_dotenv()
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
+    if not NEWS_CHANNEL_ID:
+        logger.warning("NEWS_CHANNEL_ID environment variable is not set. News will not be posted to a channel.")
     
     if len(sys.argv) > 1 and sys.argv[1] == "worker":
         logger.info("Starting bot worker (scheduler)...")
