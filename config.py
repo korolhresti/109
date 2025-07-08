@@ -14,7 +14,7 @@ ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0")) # Замініть 
 
 # URL веб-додатка (Обов'язково для веб-частини)
 # Це URL, за яким буде доступний ваш FastAPI додаток на Render
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://one07-4t7r.onrender.com")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://one09-if3u.onrender.com") # Updated URL
 
 # API Key для доступу до адмін-панелі через веб-інтерфейс (Обов'язково для веб-частини)
 API_KEY_NAME = "X-API-Key"
@@ -31,4 +31,3 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBJs77DoM3llifxy3qgYuRhaD8j5e
 # GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-

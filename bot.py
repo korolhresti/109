@@ -1621,22 +1621,16 @@ async def echo_handler(message: types.Message) -> None:
 dp.include_router(router)
 
 
-# Запуск бота (для локального тестування або окремого worker-сервісу)
-async def main() -> None:
-    # Ініціалізація пулу з'єднань до бази даних
-    await get_db_pool()
-    # Запускаємо бота
-    await dp.start_polling(bot)
-
 # Запуск FastAPI
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting up FastAPI app...")
     await get_db_pool() # Ініціалізуємо пул при запуску FastAPI
-    # !!! ВАЖЛИВО: Не запускайте dp.start_polling(bot) тут.
-    # Це призведе до конфлікту циклів подій з Uvicorn.
-    # Якщо бот має працювати в режимі polling, його слід запускати
-    # як окремий "Worker" сервіс на Render.
+
+    # Встановлюємо вебхук для бота
+    webhook_url = f"{WEB_APP_URL}/webhook"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Telegram webhook set to: {webhook_url}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1645,9 +1639,21 @@ async def shutdown_event():
     pool = await get_db_pool()
     if pool:
         await pool.close()
+    # Видаляємо вебхук при завершенні роботи
+    await bot.delete_webhook()
+    logger.info("Telegram webhook deleted.")
     # Закриваємо сесію бота
     if bot:
         await bot.session.close()
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Endpoint for Telegram webhook updates.
+    """
+    update = types.Update.model_validate(await request.json(), context={"bot": bot})
+    await dp.feed_update(bot, update)
+    return {"ok": True}
 
 
 @app.get("/", response_class=HTMLResponse)
