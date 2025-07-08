@@ -16,7 +16,7 @@ from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup # Переконайтеся, що State та StatesGroup імпортовані
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hlink
@@ -34,12 +34,11 @@ from fastapi.staticfiles import StaticFiles
 from gtts import gTTS
 from croniter import croniter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pydantic import BaseModel, Field # Імпортуємо BaseModel та Field з pydantic
+from pydantic import BaseModel, Field
 
 # Імпорт ваших локальних модулів
-import web_parser
-from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source # Додано delete_user, delete_source
-from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY # Імпортуємо всі необхідні змінні з config
+from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source
+from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY
 
 # Налаштування логування
 logger = logging.getLogger(__name__)
@@ -1478,8 +1477,10 @@ async def process_new_bot_setting_value(message: Message, state: FSMContext):
 
 # Обробник команди /news_{id} для детального перегляду новини
 @router.message(Command(re.compile(r"news_(\d+)")))
-async def show_detailed_news(message: Message):
-    news_id = int(message.text.split("_")[1])
+async def show_detailed_news(message: Message, news_id: Optional[int] = None): # Додано news_id як опціональний аргумент
+    if news_id is None: # Якщо news_id не передано, отримуємо його з тексту повідомлення
+        news_id = int(message.text.split("_")[1])
+
     news_item = await get_news_item_by_id(news_id)
 
     if not news_item:
