@@ -609,7 +609,8 @@ async def generate_text_with_gemini(prompt: str) -> str:
     chatHistory = []
     chatHistory.append({ "role": "user", "parts": [{ "text": prompt }] })
     payload = { "contents": chatHistory }
-    apiKey = os.getenv("GEMINI_API_KEY", "")
+    # Use os.getenv to retrieve the API key
+    apiKey = os.getenv("GEMINI_API_KEY", "") 
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}"
 
     try:
@@ -1177,6 +1178,7 @@ async def process_new_source_value(message: Message, state: FSMContext):
             return
 
     try:
+        # Use update_source_status as a generic update function for sources
         await update_source_status(source_id, {field: new_value})
         await message.answer(f"Поле '{field}' для джерела ID {source_id} оновлено.",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1605,24 +1607,21 @@ async def startup_event():
         # Re-raise to prevent app from starting without DB connection
         raise RuntimeError(f"Database startup failed: {e}")
 
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or TELEGRAM_BOT_TOKEN == "8088739294:AAEODIRu7koBI4K9eABlomdKsTnl6AGYi4k":
-        logger.error("TELEGRAM_BOT_TOKEN environment variable is not set or is a placeholder. Webhook will not be set.")
-        # Do not raise here, allow the app to start without webhook if token is missing
-        # This will allow the web server to run, but bot functionality will be limited.
+    # Removed the hardcoded check for the specific placeholder token
+    if not TELEGRAM_BOT_TOKEN: # Check if token is empty or None
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is not set. Webhook will not be set.")
     else:
         if not WEB_APP_URL:
             logger.error("WEB_APP_URL environment variable is not set. Webhook will not be set.")
-            # Do not raise here, allow the app to start without webhook if URL is missing
         else:
             webhook_url = f"{WEB_APP_URL}/webhook"
             logger.info(f"Attempting to set Telegram webhook to: {webhook_url}")
             try:
-                # await bot.set_webhook(webhook_url) # Temporarily commented out for debugging
+                # Uncomment the line below to enable webhook setting
+                # await bot.set_webhook(webhook_url)
                 logger.info(f"Telegram webhook setting is temporarily skipped for debugging. Please uncomment 'await bot.set_webhook(webhook_url)' later.")
-                # logger.info(f"Telegram webhook set successfully to: {webhook_url}")
             except Exception as e:
                 logger.error(f"Failed to set Telegram webhook: {e}", exc_info=True)
-                # Raise HTTPException if webhook setup is critical for app functionality
                 raise HTTPException(status_code=500, detail=f"Failed to set Telegram webhook: {e}. Check WEB_APP_URL and bot token.")
 
 
@@ -1633,10 +1632,11 @@ async def shutdown_event():
     if pool:
         await pool.close()
     try:
-        if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN != "YOUR_BOT_TOKEN_HERE" and TELEGRAM_BOT_TOKEN != "8088739294:AAEODIRu7koBI4K9eABlomdKsTnl6AGYi4k":
-            # await bot.delete_webhook() # Temporarily commented out for debugging
+        # Removed the hardcoded check for the specific placeholder token
+        if TELEGRAM_BOT_TOKEN: # Check if token is not empty or None
+            # Uncomment the line below to enable webhook deletion
+            # await bot.delete_webhook()
             logger.info("Telegram webhook deletion is temporarily skipped for debugging.")
-            # logger.info("Telegram webhook deleted.")
     except Exception as e:
         logger.warning(f"Failed to delete Telegram webhook on shutdown: {e}")
     finally:
