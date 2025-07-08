@@ -1,4 +1,4 @@
--- Таблиця користувачів
+ Таблиця користувачів
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     telegram_id BIGINT UNIQUE NOT NULL,
@@ -30,18 +30,13 @@ CREATE TABLE IF NOT EXISTS users (
 -- Таблиця джерел новин
 CREATE TABLE IF NOT EXISTS sources (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, -- Може бути NULL для системних джерел
-    source_type TEXT NOT NULL, -- 'rss', 'web', 'telegram', 'social_media'
-    feed_url TEXT UNIQUE, -- Для RSS
+    url TEXT UNIQUE NOT NULL,
     name TEXT NOT NULL,
-    last_parsed_at TIMESTAMP WITH TIME ZONE,
-    status TEXT DEFAULT 'active', -- 'active', 'inactive', 'error'
-    error_message TEXT,
-    parser_config JSONB DEFAULT '{}'::jsonb, -- Додаткові налаштування для парсера
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    is_public BOOLEAN DEFAULT FALSE,
+    category TEXT,
     language TEXT DEFAULT 'uk',
-    parse_interval_minutes INTEGER DEFAULT 60 -- Інтервал парсингу в хвилинах
+    status TEXT DEFAULT 'active', -- 'active', 'inactive'
+    last_parsed_at TIMESTAMP WITH TIME ZONE,
+    parse_interval_minutes INTEGER DEFAULT 60 -- Як часто парсити це джерело
 );
 
 -- Таблиця новин
@@ -51,89 +46,83 @@ CREATE TABLE IF NOT EXISTS news (
     title TEXT NOT NULL,
     content TEXT,
     source_url TEXT UNIQUE NOT NULL,
-    normalized_source_url TEXT UNIQUE NOT NULL,
     image_url TEXT,
     published_at TIMESTAMP WITH TIME ZONE,
-    moderation_status TEXT DEFAULT 'pending', -- 'pending', 'approved', 'rejected'
-    expires_at TIMESTAMP WITH TIME ZONE,
-    is_published_to_channel BOOLEAN DEFAULT FALSE,
-    ai_classified_topics JSONB DEFAULT '[]'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    lang TEXT DEFAULT 'uk',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_sent BOOLEAN DEFAULT FALSE -- НОВА КОЛОНКА: чи була новина вже відправлена в канал
 );
 
--- Таблиця переглядів новин користувачами
+-- Таблиця для зберігання переглядів новин користувачами
 CREATE TABLE IF NOT EXISTS user_news_views (
-    id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
     viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, news_id) -- Кожен користувач може переглянути новину лише один раз
+    PRIMARY KEY (user_id, news_id)
 );
 
--- Таблиця реакцій користувачів на новини
+-- Таблиця для зберігання реакцій користувачів на новини
 CREATE TABLE IF NOT EXISTS user_news_reactions (
-    id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
-    reaction_type TEXT NOT NULL, -- 'like', 'dislike', 'bookmark', 'share', etc.
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, news_id, reaction_type) -- Кожен користувач може мати лише одну реакцію певного типу на новину
+    reaction_type TEXT NOT NULL, -- 'like', 'dislike'
+    reacted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, news_id)
 );
 
--- Таблиця закладок
+-- Таблиця для зберігання закладок користувачів
 CREATE TABLE IF NOT EXISTS bookmarks (
-    id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, news_id)
+    PRIMARY KEY (user_id, news_id)
 );
 
--- Таблиця скарг на контент
+-- Таблиця для зберігання звітів (наприклад, про нерелевантні новини)
 CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    target_type TEXT NOT NULL, -- 'news', 'comment', etc.
-    target_id INTEGER NOT NULL,
-    reason TEXT,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    news_id INTEGER REFERENCES news(id) ON DELETE SET NULL,
+    report_type TEXT NOT NULL, -- 'irrelevant', 'inaccurate', 'spam'
+    description TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    status TEXT DEFAULT 'pending' -- 'pending', 'resolved', 'rejected'
+    status TEXT DEFAULT 'pending' -- 'pending', 'reviewed', 'resolved'
 );
 
--- Таблиця запрошень
+-- Таблиця для зберігання запрошень (для преміум, дайджесту тощо)
 CREATE TABLE IF NOT EXISTS invitations (
     id SERIAL PRIMARY KEY,
-    inviter_user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    invite_code VARCHAR(8) UNIQUE NOT NULL,
+    inviter_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    invitee_telegram_id BIGINT UNIQUE,
+    invite_code TEXT UNIQUE NOT NULL,
+    invite_type TEXT NOT NULL, -- 'premium', 'digest'
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    used_at TIMESTAMP WITH TIME ZONE, -- Може бути NULL, якщо запрошення ще не використано
-    status TEXT DEFAULT 'pending', -- 'pending', 'accepted', 'revoked'
-    invitee_telegram_id BIGINT REFERENCES users(telegram_id) ON DELETE SET NULL -- Змінено на telegram_id
+    expires_at TIMESTAMP WITH TIME ZONE,
+    used_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    used_at TIMESTAMP WITH TIME ZONE
 );
 
--- Таблиця статистики джерел
+-- Таблиця для зберігання статистики джерел
 CREATE TABLE IF NOT EXISTS source_stats (
     source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
-    publication_count INTEGER DEFAULT 0,
+    news_count INTEGER DEFAULT 0,
     last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Таблиця підписок користувачів на теми
+-- Таблиця для зберігання підписок користувачів на джерела
 CREATE TABLE IF NOT EXISTS user_subscriptions (
-    id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    topic TEXT NOT NULL,
+    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
     subscribed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, topic)
+    PRIMARY KEY (user_id, source_id)
 );
 
--- Таблиця кешу для RSS-фіду
+-- Таблиця для кешування RSS-стрічок (якщо буде використовуватися)
 CREATE TABLE IF NOT EXISTS rss_cache (
     id SERIAL PRIMARY KEY,
-    feed_url TEXT UNIQUE NOT NULL,
-    etag TEXT,
-    last_modified TEXT,
-    cached_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+    last_hash TEXT NOT NULL,
+    last_checked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Таблиця для зберігання черги завдань (наприклад, для відкладеного парсингу)
@@ -165,5 +154,9 @@ INSERT INTO bot_settings (setting_key, setting_value, description) VALUES
 ON CONFLICT (setting_key) DO NOTHING;
 
 INSERT INTO bot_settings (setting_key, setting_value, description) VALUES
-('PREMIUM_MAX_AI_REQUESTS_PER_DAY', '50', 'Максимальна кількість AI-запитів на день для преміум-користувачів')
+('NEWS_PUBLISH_INTERVAL_MINUTES', '5', 'Інтервал публікації новин в канал')
+ON CONFLICT (setting_key) DO NOTHING;
+
+INSERT INTO bot_settings (setting_key, setting_value, description) VALUES
+('NEWS_PARSE_INTERVAL_MINUTES', '15', 'Інтервал парсингу новин з джерел')
 ON CONFLICT (setting_key) DO NOTHING;

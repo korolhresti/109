@@ -4,8 +4,8 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timezone # Added datetime and timezone import
-import json # Ensure json is imported for task_queue
+from datetime import datetime, timezone, date
+import json
 
 load_dotenv()
 
@@ -34,7 +34,6 @@ async def get_db_pool():
             raise ValueError("DATABASE_URL environment variable is not set.")
         
         conninfo = DATABASE_URL
-        # Додаємо sslmode=require, якщо його немає, для безпечного з'єднання
         if "sslmode" not in conninfo:
             conninfo += "?sslmode=require"
 
@@ -44,9 +43,8 @@ async def get_db_pool():
                 min_size=1,
                 max_size=10,
                 open=psycopg.AsyncConnection.connect,
-                reconnect_timeout=30 # Додаємо таймаут для відновлення з'єднання
+                reconnect_timeout=30
             )
-            # Перевіряємо з'єднання
             async with db_pool.connection() as conn:
                 await conn.execute("SELECT 1")
             logger.info("DB pool initialized successfully.")
@@ -103,7 +101,7 @@ async def add_news_item(source_id: int, title: str, content: str, source_url: st
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "INSERT INTO news (source_id, title, content, source_url, image_url, published_at, lang) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;",
+                "INSERT INTO news (source_id, title, content, source_url, image_url, published_at, lang, is_sent) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE) RETURNING id;",
                 (source_id, title, content, source_url, image_url, published_at, lang)
             )
             news_id = (await cur.fetchone())[0]
@@ -255,6 +253,26 @@ async def delete_news_item_by_id(news_id: int) -> bool:
             deleted_rows = cur.rowcount
             await conn.commit()
             return deleted_rows > 0
+
+async def get_one_unsent_news_item() -> Optional[Dict[str, Any]]:
+    """
+    Отримує одну новину, яка ще не була відправлена в канал.
+    """
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            await cur.execute("SELECT * FROM news WHERE is_sent = FALSE ORDER BY published_at ASC LIMIT 1;")
+            return await cur.fetchone()
+
+async def mark_news_as_sent(news_id: int):
+    """
+    Позначає новину як відправлену.
+    """
+    pool = await get_db_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("UPDATE news SET is_sent = TRUE WHERE id = %s;", (news_id,))
+            await conn.commit()
 
 async def get_source_by_url(url: str) -> Optional[Dict[str, Any]]:
     """
@@ -568,3 +586,4 @@ if __name__ == "__main__":
             if db_pool:
                 await db_pool.close()
     asyncio.run(test_db_connection())
+
