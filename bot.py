@@ -1619,7 +1619,7 @@ async def echo_handler(message: types.Message) -> None:
 dp.include_router(router)
 
 
-# Запуск бота
+# Запуск бота (для локального тестування або окремого worker-сервісу)
 async def main() -> None:
     # Ініціалізація пулу з'єднань до бази даних
     await get_db_pool()
@@ -1631,8 +1631,22 @@ async def main() -> None:
 async def startup_event():
     logger.info("Starting up FastAPI app...")
     await get_db_pool() # Ініціалізуємо пул при запуску FastAPI
-    # Запускаємо бота в окремому завданні
-    asyncio.create_task(main())
+    # !!! ВАЖЛИВО: Не запускайте dp.start_polling(bot) тут.
+    # Це призведе до конфлікту циклів подій з Uvicorn.
+    # Якщо бот має працювати в режимі polling, його слід запускати
+    # як окремий "Worker" сервіс на Render.
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down FastAPI app...")
+    # Закриваємо пул з'єднань до бази даних
+    pool = await get_db_pool()
+    if pool:
+        await pool.close()
+    # Закриваємо сесію бота
+    if bot:
+        await bot.session.close()
+
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -1797,5 +1811,12 @@ if __name__ == "__main__":
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
         # Замість sys.exit(1) просто виводимо помилку і дозволяємо FastAPI запуститися
         # Це дозволить веб-частині додатка працювати, навіть якщо бот не може підключитися
-    uvicorn.run(app, host="0.0.0.0", port=os.getenv("PORT", 8000))
+    
+    # Цей блок виконується лише при локальному запуску файлу bot.py напряму.
+    # На Render, Procfile запускає Uvicorn, який імпортує 'app',
+    # тому цей блок не виконується в розгорнутому середовищі.
+    # Якщо ви хочете запустити polling бота локально разом з FastAPI,
+    # вам знадобиться більш складна конфігурація або окремі процеси.
+    logger.info("Running FastAPI app locally via uvicorn. Bot polling will not start automatically here.")
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
