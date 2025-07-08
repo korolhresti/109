@@ -237,4 +237,3 @@ if __name__ == "__main__":
                 print("  No news found or error during parsing.")
 
     asyncio.run(main())
-
