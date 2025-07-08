@@ -49,9 +49,11 @@ CREATE TABLE IF NOT EXISTS news (
     image_url TEXT,
     published_at TIMESTAMP WITH TIME ZONE,
     lang TEXT DEFAULT 'uk',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    is_sent BOOLEAN DEFAULT FALSE -- НОВА КОЛОНКА: чи була новина вже відправлена в канал
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Додаємо колонку is_sent до таблиці news, якщо її ще немає
+ALTER TABLE news ADD COLUMN IF NOT EXISTS is_sent BOOLEAN DEFAULT FALSE;
 
 -- Таблиця для зберігання переглядів новин користувачами
 CREATE TABLE IF NOT EXISTS user_news_views (
