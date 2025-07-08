@@ -8,16 +8,17 @@ import random
 import io
 import base64
 import time
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Callable, Awaitable
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 import re
+import sys
 
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Update
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
@@ -38,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY
+import web_parser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -61,9 +63,11 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=Pars
 dp = Dispatcher()
 router = Router()
 
+scheduler = AsyncIOScheduler()
+
 @dp.errors()
-async def errors_handler(exception: Exception, update: types.Update):
-    logger.error(f"Error occurred in handler for update {update.update_id}: {exception}", exc_info=exception)
+async def errors_handler(exception: Exception, event: types.ErrorEvent):
+    logger.error(f"Error occurred in handler for update {event.update.update_id}: {exception}", exc_info=exception)
 
 
 class UserSettings(StatesGroup):
@@ -148,8 +152,12 @@ async def get_or_create_user(telegram_id: int, username: str, first_name: str, l
 
     return user
 
-@dp.message()
-async def user_middleware(message: Message, state: FSMContext, handler):
+@dp.message.middleware()
+async def user_middleware(
+    handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
+    message: Message,
+    data: Dict[str, Any]
+) -> Any:
     if message.from_user:
         await get_or_create_user(
             message.from_user.id,
@@ -157,7 +165,58 @@ async def user_middleware(message: Message, state: FSMContext, handler):
             message.from_user.first_name,
             message.from_user.last_name
         )
-    await handler(message, state)
+    return await handler(message, data)
+
+async def scheduled_news_check():
+    logger.info("Running scheduled news check...")
+    active_sources = await get_all_active_sources()
+    for source in active_sources:
+        if source.get('status') == 'active':
+            logger.info(f"Parsing source: {source['name']} ({source['url']})")
+            parsed_data = await web_parser.parse_website(source['url'])
+            if parsed_data:
+                existing_news = await get_news_by_source_id(source['id'])
+                is_duplicate = False
+                for news in existing_news:
+                    if news['source_url'] == parsed_data['source_url'] and news['title'] == parsed_data['title']:
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    news_id = await add_news_item(
+                        source['id'],
+                        parsed_data['title'],
+                        parsed_data['content'],
+                        parsed_data['source_url'],
+                        parsed_data.get('image_url'),
+                        parsed_data.get('published_at'),
+                        parsed_data.get('lang', 'uk')
+                    )
+                    logger.info(f"Added new news item from {source['name']}: {parsed_data['title']} (ID: {news_id})")
+
+                    subscribed_users = await get_all_users()
+                    for user in subscribed_users:
+                        user_subscriptions = await get_user_subscriptions(user['id'])
+                        subscribed_source_ids = {s['source_id'] for s in user_subscriptions}
+                        if user.get('auto_notifications') and source['id'] in subscribed_source_ids:
+                            try:
+                                notification_text = (
+                                    f"<b>Нова новина з {source['name']}!</b>\n\n"
+                                    f"<b>{parsed_data['title']}</b>\n"
+                                    f"{hlink('Читати далі', parsed_data['source_url'])}"
+                                )
+                                await bot.send_message(user['telegram_id'], notification_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+                                logger.info(f"Sent notification to user {user['telegram_id']}")
+                            except Exception as e:
+                                logger.error(f"Failed to send notification to user {user['telegram_id']}: {e}")
+                else:
+                    logger.info(f"News from {source['name']} already exists: {parsed_data['title']}")
+            else:
+                logger.warning(f"Failed to parse news from {source['name']} ({source['url']})")
+            await update_source_last_parsed(source['id'], datetime.now(timezone.utc))
+        else:
+            logger.info(f"Skipping inactive source: {source['name']}")
+    logger.info("Finished scheduled news check.")
 
 
 @router.message(CommandStart())
@@ -1707,11 +1766,22 @@ async def get_news_digest_web():
     """
 
 if __name__ == "__main__":
-    import uvicorn
     load_dotenv()
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
     
-    logger.info("Running FastAPI app locally via uvicorn. Bot polling will not start automatically here.")
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    if len(sys.argv) > 1 and sys.argv[1] == "worker":
+        logger.info("Starting bot worker (scheduler)...")
+        asyncio.run(get_db_pool())
+        scheduler.add_job(scheduled_news_check, 'interval', minutes=5)
+        scheduler.start()
+        try:
+            asyncio.get_event_loop().run_forever()
+        except (KeyboardInterrupt, SystemExit):
+            scheduler.shutdown()
+            logger.info("Bot worker shut down.")
+    else:
+        logger.info("Running FastAPI app locally via uvicorn. Bot polling will not start automatically here.")
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
