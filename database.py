@@ -4,6 +4,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone # Added datetime and timezone import
 
 load_dotenv()
 
