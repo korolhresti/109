@@ -39,6 +39,8 @@ from pydantic import BaseModel, Field
 
 from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source, delete_news_item_by_id, get_one_unsent_news_item, mark_news_as_sent
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY, NEWS_CHANNEL_ID
+
+# Імпортуємо web_parser
 import web_parser
 
 logger = logging.getLogger(__name__)
@@ -66,8 +68,8 @@ router = Router()
 scheduler = AsyncIOScheduler()
 
 @dp.errors()
-async def errors_handler(exception: Exception, event: types.ErrorEvent):
-    logger.error(f"Error occurred in handler for update {event.update.update_id}: {exception}", exc_info=exception)
+async def errors_handler(update: types.Update, exception: Exception): # Виправлено аргументи
+    logger.error(f"Error occurred in handler for update {update.update_id}: {exception}", exc_info=exception)
 
 
 class UserSettings(StatesGroup):
@@ -178,6 +180,10 @@ async def user_middleware(
 async def parse_all_sources_job():
     logger.info("Running scheduled news parsing job...")
     active_sources = await get_all_active_sources()
+    if not active_sources:
+        logger.info("No active sources found to parse.")
+        return
+
     for source in active_sources:
         try:
             logger.info(f"Parsing source: {source['name']} ({source['url']})")
@@ -185,68 +191,64 @@ async def parse_all_sources_job():
             
             if recent_news_items:
                 for parsed_data in recent_news_items:
-                    # Check if news already exists by source_url to avoid duplicates
-                    # Note: get_source_by_url checks sources table, not news.
-                    # We need to check if a news item with this source_url already exists in the news table.
-                    # This requires a new DB function or a direct query.
-                    # For now, let's assume `add_news_item` handles duplicates based on source_url UNIQUE constraint.
-                    # If `add_news_item` raises an IntegrityError (duplicate source_url), it will be caught by the outer try-except.
-                    
-                    # To properly check for existing news, we'd need a function like:
-                    # `async def get_news_by_source_url(source_url: str) -> Optional[Dict[str, Any]]:`
-                    # For simplicity and to avoid adding more DB functions right now, we'll rely on the UNIQUE constraint
-                    # on `source_url` in the `news` table to prevent true duplicates.
-                    # The `is_duplicate` check in the previous version was only checking against already parsed news in the current run,
-                    # not against the entire DB.
-
-                    news_id = await add_news_item(
-                        source['id'],
-                        parsed_data['title'],
-                        parsed_data['content'],
-                        parsed_data['source_url'],
-                        parsed_data.get('image_url'),
-                        parsed_data.get('published_at'),
-                        parsed_data.get('lang', 'uk')
-                    )
-                    logger.info(f"Added new news item from {source['name']}: {parsed_data['title']} (ID: {news_id})")
+                    try:
+                        news_id = await add_news_item(
+                            source['id'],
+                            parsed_data['title'],
+                            parsed_data['content'],
+                            parsed_data['source_url'],
+                            parsed_data.get('image_url'),
+                            parsed_data.get('published_at'),
+                            parsed_data.get('lang', 'uk')
+                        )
+                        logger.info(f"Added new news item from {source['name']}: {parsed_data['title']} (ID: {news_id})")
+                    except psycopg.IntegrityError:
+                        logger.info(f"News item with URL {parsed_data['source_url']} already exists. Skipping.")
             else:
                 logger.warning(f"No new news found or failed to parse from {source['name']} ({source['url']})")
             await update_source_last_parsed(source['id'], datetime.now(timezone.utc))
-        except psycopg.IntegrityError as e:
-            # This means a news item with the same source_url already exists
-            logger.info(f"Skipping duplicate news item from {source.get('name', source['url'])}: {e}")
         except Exception as e:
             logger.error(f"Error during parsing source {source.get('name', source['url'])}: {e}", exc_info=True)
     logger.info("Finished scheduled news parsing job.")
 
 async def publish_news_to_channel_job():
     logger.info("Running scheduled news publishing job...")
-    if not NEWS_CHANNEL_ID:
-        logger.warning("NEWS_CHANNEL_ID is not set. Skipping news publishing to channel.")
+    if not NEWS_CHANNEL_ID or NEWS_CHANNEL_ID == 0:
+        logger.warning("NEWS_CHANNEL_ID is not set or is 0 in config.py. Skipping news publishing to channel.")
         return
 
+    logger.info(f"Attempting to fetch one unsent news item for channel {NEWS_CHANNEL_ID}...")
     news_item = await get_one_unsent_news_item()
+    
     if news_item:
+        logger.info(f"Found unsent news item: ID={news_item['id']}, Title='{news_item['title']}'")
         try:
             source = await get_source_by_id(news_item['source_id'])
             source_name = source['name'] if source else "Невідоме джерело"
             
+            truncated_content = news_item['content']
+            if len(truncated_content) > 500:
+                truncated_content = truncated_content[:500] + "..."
+
             channel_post_text = (
                 f"<b>Нова новина з {source_name}!</b>\n\n"
                 f"<b>{news_item['title']}</b>\n"
-                f"{news_item['content'][:500]}...\n\n" # Truncate content for preview
+                f"{truncated_content}\n\n" # Truncate content for preview
                 f"{hlink('Читати далі', news_item['source_url'])}"
             )
             
             if news_item.get('image_url'):
+                logger.info(f"Sending photo with caption for news ID {news_item['id']} to channel {NEWS_CHANNEL_ID} (Image: {news_item['image_url']}).")
                 await bot.send_photo(NEWS_CHANNEL_ID, photo=news_item['image_url'], caption=channel_post_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             else:
+                logger.info(f"Sending text message for news ID {news_item['id']} to channel {NEWS_CHANNEL_ID}.")
                 await bot.send_message(NEWS_CHANNEL_ID, channel_post_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             
             await mark_news_as_sent(news_item['id'])
             logger.info(f"Published news item {news_item['id']} to channel {NEWS_CHANNEL_ID} and marked as sent.")
         except Exception as e:
             logger.error(f"Failed to publish news item {news_item['id']} to channel {NEWS_CHANNEL_ID}: {e}", exc_info=True)
+            # Optionally, mark news as failed or retry later if it's a transient error
     else:
         logger.info("No unsent news items found to publish.")
     logger.info("Finished scheduled news publishing job.")
@@ -374,6 +376,7 @@ async def set_language_callback_handler(callback: CallbackQuery, state: FSMConte
 
 @router.callback_query(F.data.startswith("set_lang_"), UserSettings.choosing_language)
 async def process_language_choice(callback: CallbackQuery, state: FSMContext):
+    await callback.answer() # Додано await callback.answer()
     lang_code = callback.data.split("_")[2]
     await update_user_field(callback.from_user.id, 'preferred_language', lang_code)
     await callback.answer(f"Мову встановлено на {lang_code.upper()}", show_alert=True)
@@ -547,7 +550,7 @@ async def generate_text_with_gemini(prompt: str) -> str:
     Calls the Gemini API to generate text based on the given prompt.
     """
     chatHistory = []
-    chatHistory.append({ "role": "user", "parts": [{ "text": prompt }] })
+    chatHistory.push({ "role": "user", "parts": [{ "text": prompt }] })
     payload = { "contents": chatHistory }
     apiKey = os.getenv("GEMINI_API_KEY", "")
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}"
@@ -1756,8 +1759,9 @@ if __name__ == "__main__":
     load_dotenv()
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
-    if not NEWS_CHANNEL_ID:
-        logger.warning("NEWS_CHANNEL_ID environment variable is not set. News will not be posted to a channel.")
+    # Перевіряємо NEWS_CHANNEL_ID після завантаження з config.py
+    if not NEWS_CHANNEL_ID or NEWS_CHANNEL_ID == 0:
+        logger.warning("NEWS_CHANNEL_ID environment variable is not set or is 0. News will not be posted to a channel.")
     
     if len(sys.argv) > 1 and sys.argv[1] == "worker":
         logger.info("Starting bot worker (scheduler)...")

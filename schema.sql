@@ -29,15 +29,41 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Таблиця джерел новин
 CREATE TABLE IF NOT EXISTS sources (
-    id SERIAL PRIMARY KEY,
-    url TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    category TEXT,
-    language TEXT DEFAULT 'uk',
-    status TEXT DEFAULT 'active', -- 'active', 'inactive'
-    last_parsed_at TIMESTAMP WITH TIME ZONE,
-    parse_interval_minutes INTEGER DEFAULT 60 -- Як часто парсити це джерело
+    id SERIAL PRIMARY KEY
 );
+
+-- Додаємо колонки до таблиці sources, якщо їх ще немає
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS url TEXT UNIQUE;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'uk';
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'; -- 'active', 'inactive'
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_parsed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS parse_interval_minutes INTEGER DEFAULT 60; -- Як часто парсити це джерело
+
+-- Встановлюємо NOT NULL та UNIQUE для url, якщо вони ще не встановлені
+-- Це може викликати помилку, якщо вже є дублікати або NULL значення.
+-- Якщо виникають проблеми, можливо, доведеться спочатку очистити або оновити дані.
+DO $$ BEGIN
+    BEGIN
+        ALTER TABLE sources ALTER COLUMN url SET NOT NULL;
+        ALTER TABLE sources ADD CONSTRAINT sources_url_unique UNIQUE (url);
+    EXCEPTION
+        WHEN duplicate_object THEN NULL;
+        WHEN not_null_violation THEN
+            RAISE NOTICE 'Cannot set URL column to NOT NULL due to existing NULL values. Please clean your data.';
+    END;
+END $$;
+DO $$ BEGIN
+    BEGIN
+        ALTER TABLE sources ALTER COLUMN name SET NOT NULL;
+    EXCEPTION
+        WHEN duplicate_object THEN NULL;
+        WHEN not_null_violation THEN
+            RAISE NOTICE 'Cannot set name column to NOT NULL due to existing NULL values. Please clean your data.';
+    END;
+END $$;
+
 
 -- Таблиця новин
 CREATE TABLE IF NOT EXISTS news (
