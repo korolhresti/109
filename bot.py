@@ -30,14 +30,14 @@ from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Depends, Request
 from fastapi.security import APIKeyHeader
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse # Added RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from gtts import gTTS
 from croniter import croniter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import BaseModel, Field
 
-from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source, delete_news_item_by_id # Added delete_news_item_by_id
+from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source, delete_news_item_by_id
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY, NEWS_CHANNEL_ID
 import web_parser
 
@@ -480,7 +480,7 @@ async def generate_news_with_ai(prompt: str) -> str:
     Calls the Gemini API to generate news based on the given prompt.
     """
     chatHistory = []
-    chatHistory.push({ "role": "user", "parts": [{ "text": prompt }] })
+    chatHistory.append({ "role": "user", "parts": [{ "text": prompt }] }) # Changed push to append
     payload = { "contents": chatHistory }
     apiKey = os.getenv("GEMINI_API_KEY", "") # Get API key from environment
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}"
@@ -1013,7 +1013,7 @@ async def process_delete_source_id(message: Message, state: FSMContext):
         await state.update_data(delete_source_id=source_id)
         kb = [
             [InlineKeyboardButton(text="✅ Так, видалити", callback_data="confirm_delete_source")],
-            [InlineKeyboardButton(text="❌ Ні, скасувати", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="❌ Ні,, скасувати", callback_data="admin_panel")]
         ]
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         await message.answer(f"Ви впевнені, що хочете видалити джерело ID {source_id} ({source['name']})? Це також видалить всі пов'язані новини та підписки.",
@@ -1357,9 +1357,24 @@ async def startup_event():
     logger.info("Starting up FastAPI app...")
     await get_db_pool()
 
-    webhook_url = f"{WEB_APP_URL}/webhook"
-    await bot.set_webhook(webhook_url)
-    logger.info(f"Telegram webhook set to: {webhook_url}")
+    if not WEB_APP_URL:
+        logger.error("WEB_APP_URL environment variable is not set. Webhook will not be set.")
+        # Optionally, raise an exception to prevent startup if webhook is critical
+        # raise ValueError("WEB_APP_URL is not set.")
+    else:
+        webhook_url = f"{WEB_APP_URL}/webhook"
+        logger.info(f"Attempting to set Telegram webhook to: {webhook_url}")
+        try:
+            await bot.set_webhook(webhook_url)
+            logger.info(f"Telegram webhook set successfully to: {webhook_url}")
+        except Exception as e:
+            logger.error(f"Failed to set Telegram webhook: {e}", exc_info=True)
+            # Depending on criticality, you might want to re-raise or handle differently
+            # For now, we log and allow startup to continue if other parts of the app are independent
+            # However, for a bot that relies on webhooks, this is a critical failure.
+            # Raising HTTPException here will stop the FastAPI app from starting.
+            raise HTTPException(status_code=500, detail=f"Failed to set Telegram webhook: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1367,8 +1382,11 @@ async def shutdown_event():
     pool = await get_db_pool()
     if pool:
         await pool.close()
-    await bot.delete_webhook()
-    logger.info("Telegram webhook deleted.")
+    try:
+        await bot.delete_webhook()
+        logger.info("Telegram webhook deleted.")
+    except Exception as e:
+        logger.warning(f"Failed to delete Telegram webhook on shutdown: {e}")
     if bot:
         await bot.session.close()
 
