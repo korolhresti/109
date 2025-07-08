@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS sources (
 );
 
 -- Додаємо колонки до таблиці sources, якщо їх ще немає
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS url TEXT UNIQUE;
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS url TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS name TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT;
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'uk';
@@ -52,15 +52,20 @@ DO $$ BEGIN
         WHEN duplicate_object THEN NULL;
         WHEN not_null_violation THEN
             RAISE NOTICE 'Cannot set URL column to NOT NULL due to existing NULL values. Please clean your data.';
+            -- Якщо ви хочете автоматично заповнити NULL значення перед встановленням NOT NULL
+            -- UPDATE sources SET url = 'http://placeholder.com/' || id WHERE url IS NULL;
+            -- ALTER TABLE sources ALTER COLUMN url SET NOT NULL;
     END;
 END $$;
 DO $$ BEGIN
     BEGIN
         ALTER TABLE sources ALTER COLUMN name SET NOT NULL;
     EXCEPTION
-        WHEN duplicate_object THEN NULL;
+        WHEN duplicate_object THEN NULL; -- Це для унікальних індексів, тут неактуально
         WHEN not_null_violation THEN
             RAISE NOTICE 'Cannot set name column to NOT NULL due to existing NULL values. Please clean your data.';
+            -- UPDATE sources SET name = 'Unnamed Source ' || id WHERE name IS NULL;
+            -- ALTER TABLE sources ALTER COLUMN name SET NOT NULL;
     END;
 END $$;
 
