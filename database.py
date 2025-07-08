@@ -3,8 +3,9 @@ import logging
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union # Added Union import
 from datetime import datetime, date, timezone
+import json # Added json import for task_data
 
 load_dotenv()
 
