@@ -29,136 +29,150 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Таблиця джерел новин
 CREATE TABLE IF NOT EXISTS sources (
-    id SERIAL PRIMARY KEY
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT UNIQUE NOT NULL,
+    category TEXT NOT NULL,
+    language TEXT NOT NULL,
+    description TEXT,
+    status TEXT DEFAULT 'active',
+    last_parsed_at TIMESTAMP WITH TIME ZONE,
+    last_error TEXT,
+    original_url TEXT, -- NEW COLUMN: to store the original URL if redirects occur
+    source_name TEXT, -- NEW COLUMN: to store the name from RSS/site if different from 'name'
+    source_category TEXT, -- NEW COLUMN: to store the category from RSS/site
+    source_language TEXT, -- NEW COLUMN: to store the language from RSS/site
+    feed_url TEXT UNIQUE,
+    parse_interval_minutes INTEGER DEFAULT 60
 );
 
--- Додаємо колонки до таблиці sources, якщо їх ще немає
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS url TEXT;
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS name TEXT;
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS category TEXT;
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'uk';
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'; -- 'active', 'inactive'
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS last_parsed_at TIMESTAMP WITH TIME ZONE;
-ALTER TABLE sources ADD COLUMN IF NOT EXISTS parse_interval_minutes INTEGER DEFAULT 60; -- Як часто парсити це джерело
-
--- Встановлюємо NOT NULL та UNIQUE для url, якщо вони ще не встановлені
--- Це може викликати помилку, якщо вже є дублікати або NULL значення.
--- Якщо виникають проблеми, можливо, доведеться спочатку очистити або оновити дані.
-DO $$ BEGIN
-    BEGIN
-        ALTER TABLE sources ALTER COLUMN url SET NOT NULL;
+-- Додаємо унікальний індекс на URL, якщо він ще не існує
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sources_url_unique') THEN
         ALTER TABLE sources ADD CONSTRAINT sources_url_unique UNIQUE (url);
-    EXCEPTION
-        WHEN duplicate_object THEN NULL;
-        WHEN not_null_violation THEN
-            RAISE NOTICE 'Cannot set URL column to NOT NULL due to existing NULL values. Please clean your data.';
-            -- Якщо ви хочете автоматично заповнити NULL значення перед встановленням NOT NULL
-            -- UPDATE sources SET url = 'http://placeholder.com/' || id WHERE url IS NULL;
-            -- ALTER TABLE sources ALTER COLUMN url SET NOT NULL;
-    END;
-END $$;
-DO $$ BEGIN
-    BEGIN
-        ALTER TABLE sources ALTER COLUMN name SET NOT NULL;
-    EXCEPTION
-        WHEN duplicate_object THEN NULL; -- Це для унікальних індексів, тут неактуально
-        WHEN not_null_violation THEN
-            RAISE NOTICE 'Cannot set name column to NOT NULL due to existing NULL values. Please clean your data.';
-            -- UPDATE sources SET name = 'Unnamed Source ' || id WHERE name IS NULL;
-            -- ALTER TABLE sources ALTER COLUMN name SET NOT NULL;
-    END;
+    END IF;
 END $$;
 
+-- Додаємо або оновлюємо стовпці з IF NOT EXISTS для уникнення помилок
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='status') THEN
+        ALTER TABLE sources ADD COLUMN status TEXT DEFAULT 'active';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='last_parsed_at') THEN
+        ALTER TABLE sources ADD COLUMN last_parsed_at TIMESTAMP WITH TIME ZONE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='parse_interval_minutes') THEN
+        ALTER TABLE sources ADD COLUMN parse_interval_minutes INTEGER DEFAULT 60;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='original_url') THEN
+        ALTER TABLE sources ADD COLUMN original_url TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_name') THEN
+        ALTER TABLE sources ADD COLUMN source_name TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_category') THEN
+        ALTER TABLE sources ADD COLUMN source_category TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_language') THEN
+        ALTER TABLE sources ADD COLUMN source_language TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='feed_url') THEN
+        ALTER TABLE sources ADD COLUMN feed_url TEXT UNIQUE;
+    END IF;
+END $$;
 
 -- Таблиця новин
 CREATE TABLE IF NOT EXISTS news (
     id SERIAL PRIMARY KEY,
-    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE NOT NULL,
     title TEXT NOT NULL,
     content TEXT,
     source_url TEXT UNIQUE NOT NULL,
     image_url TEXT,
     published_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     lang TEXT DEFAULT 'uk',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    is_sent BOOLEAN DEFAULT FALSE -- NEW COLUMN: to track if news has been sent to channel
 );
 
--- Додаємо колонку is_sent до таблиці news, якщо її ще немає
-ALTER TABLE news ADD COLUMN IF NOT EXISTS is_sent BOOLEAN DEFAULT FALSE;
-
--- Таблиця для зберігання переглядів новин користувачами
+-- Таблиця переглядів новин користувачами
 CREATE TABLE IF NOT EXISTS user_news_views (
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE NOT NULL,
     viewed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, news_id)
 );
 
--- Таблиця для зберігання реакцій користувачів на новини
+-- Таблиця реакцій користувачів на новини
 CREATE TABLE IF NOT EXISTS user_news_reactions (
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
-    reaction_type TEXT NOT NULL, -- 'like', 'dislike'
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE NOT NULL,
+    reaction TEXT NOT NULL, -- 'like', 'dislike', 'bookmark', etc.
     reacted_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, news_id)
 );
 
--- Таблиця для зберігання закладок користувачів
+-- Таблиця закладок
 CREATE TABLE IF NOT EXISTS bookmarks (
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, news_id)
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE NOT NULL,
+    bookmarked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, news_id)
 );
 
--- Таблиця для зберігання звітів (наприклад, про нерелевантні новини)
+-- Таблиця звітів про новини/джерела
 CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    news_id INTEGER REFERENCES news(id) ON DELETE SET NULL,
-    report_type TEXT NOT NULL, -- 'irrelevant', 'inaccurate', 'spam'
-    description TEXT,
+    report_type TEXT NOT NULL, -- 'news_error', 'source_issue', 'other'
+    report_data JSONB, -- Додаткові дані про звіт
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     status TEXT DEFAULT 'pending' -- 'pending', 'reviewed', 'resolved'
 );
 
--- Таблиця для зберігання запрошень (для преміум, дайджесту тощо)
+-- Таблиця запрошень
 CREATE TABLE IF NOT EXISTS invitations (
     id SERIAL PRIMARY KEY,
-    inviter_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    invitee_telegram_id BIGINT UNIQUE,
+    inviter_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
     invite_code TEXT UNIQUE NOT NULL,
-    invite_type TEXT NOT NULL, -- 'premium', 'digest'
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP WITH TIME ZONE,
-    used_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    used_at TIMESTAMP WITH TIME ZONE
+    max_uses INTEGER DEFAULT 1,
+    current_uses INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE
 );
 
--- Таблиця для зберігання статистики джерел
+-- Таблиця статистики джерел
 CREATE TABLE IF NOT EXISTS source_stats (
-    source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
-    news_count INTEGER DEFAULT 0,
-    last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE NOT NULL,
+    total_news_parsed INTEGER DEFAULT 0,
+    last_24h_news INTEGER DEFAULT 0,
+    last_7d_news INTEGER DEFAULT 0,
+    last_update TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_id)
 );
 
--- Таблиця для зберігання підписок користувачів на джерела
+-- Таблиця підписок користувачів на джерела
 CREATE TABLE IF NOT EXISTS user_subscriptions (
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE NOT NULL,
     subscribed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, source_id)
 );
 
--- Таблиця для кешування RSS-стрічок (якщо буде використовуватися)
+-- Таблиця для кешування RSS-стрічок
 CREATE TABLE IF NOT EXISTS rss_cache (
-    id SERIAL PRIMARY KEY,
-    source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
-    last_hash TEXT NOT NULL,
-    last_checked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    feed_url TEXT PRIMARY KEY,
+    last_fetched TIMESTAMP WITH TIME ZONE,
+    content TEXT,
+    etag TEXT,
+    last_modified TEXT
 );
 
--- Таблиця для зберігання черги завдань (наприклад, для відкладеного парсингу)
+-- Таблиця черги завдань
 CREATE TABLE IF NOT EXISTS task_queue (
     id SERIAL PRIMARY KEY,
     task_type TEXT NOT NULL, -- 'parse_source', 'send_digest', etc.
@@ -191,5 +205,22 @@ INSERT INTO bot_settings (setting_key, setting_value, description) VALUES
 ON CONFLICT (setting_key) DO NOTHING;
 
 INSERT INTO bot_settings (setting_key, setting_value, description) VALUES
-('NEWS_PARSE_INTERVAL_MINUTES', '15', 'Інтервал парсингу новин з джерел')
+('NEWS_PARSE_INTERVAL_MINUTES', '15', 'Інтервал парсингу новин для всіх активних джерел')
 ON CONFLICT (setting_key) DO NOTHING;
+
+-- Ensure source_name, source_category, source_language are nullable
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_name' AND is_nullable='NO') THEN
+        ALTER TABLE sources ALTER COLUMN source_name DROP NOT NULL;
+        RAISE NOTICE 'Dropped NOT NULL constraint on sources.source_name';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_category' AND is_nullable='NO') THEN
+        ALTER TABLE sources ALTER COLUMN source_category DROP NOT NULL;
+        RAISE NOTICE 'Dropped NOT NULL constraint on sources.source_category';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='sources' AND column_name='source_language' AND is_nullable='NO') THEN
+        ALTER TABLE sources ALTER COLUMN source_language DROP NOT NULL;
+        RAISE NOTICE 'Dropped NOT NULL constraint on sources.source_language';
+    END IF;
+END $$;
