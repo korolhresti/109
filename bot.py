@@ -119,6 +119,8 @@ class SourceManagement(StatesGroup):
     waiting_for_status = State()
     waiting_for_parse_interval = State()
     waiting_for_edit_id = State()
+    waiting_for_edit_field = State() # Added missing state
+    waiting_for_new_value = State()  # Added missing state
     waiting_for_delete_id = State()
 
 class NewsDigest(StatesGroup):
