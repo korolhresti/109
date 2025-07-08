@@ -2125,7 +2125,7 @@ if __name__ == "__main__":
         logger.info("Running FastAPI app locally via uvicorn. Bot polling will not start automatically here.")
         # Ensure the webhook is set if running in web mode and WEB_APP_URL is available
         @app.on_event("startup")
-        async def on_startup():
+        async def on_startup_web(): # Renamed to avoid conflict
             logger.info("FastAPI app startup: Initializing DB pool and setting webhook...")
             await get_db_pool() # Initialize DB pool for web process
             if TELEGRAM_BOT_TOKEN and WEB_APP_URL:
@@ -2556,14 +2556,10 @@ if __name__ == "__main__":
                 logger.error(f"Web: Error deleting news item {news_id}: {e}", exc_info=True)
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-
-from apscheduler.triggers.interval import IntervalTrigger
-
-async def on_startup():
-    scheduler.add_job(parse_all_sources_job, IntervalTrigger(minutes=15), id="parse_job", replace_existing=True)
-    scheduler.add_job(publish_news_to_channel_job, IntervalTrigger(minutes=5), id="publish_job", replace_existing=True)
-    scheduler.start()
-
+        # The `on_startup` function was duplicated and causing issues.
+        # It's already handled by the `@app.on_event("startup")` decorator above.
+        # The scheduler should only be started by the 'worker' process.
+        # Removed the duplicated `on_startup` function definition here.
 
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
