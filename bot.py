@@ -75,17 +75,24 @@ logger.addHandler(stream_handler)
 # --- End Logging setup ---
 
 # Initialize Bot and Dispatcher
-if TELEGRAM_BOT_TOKEN:
-    default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
-    bot = Bot(token=TELEGRAM_BOT_TOKEN, default=default_props)
-    dp = Dispatcher()
-    # Initialize main router
-    main_router = Router()
-    dp.include_router(main_router)
-else:
-    logger.error("TELEGRAM_BOT_TOKEN is not set. Bot cannot be initialized.")
-    bot = None
-    dp = None
+bot = None
+dp = None
+try:
+    if TELEGRAM_BOT_TOKEN:
+        default_props = DefaultBotProperties(parse_mode=ParseMode.HTML)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, default=default_props)
+        dp = Dispatcher()
+        # Initialize main router
+        main_router = Router()
+        dp.include_router(main_router)
+        logger.info("Bot and Dispatcher initialized successfully.")
+    else:
+        logger.error("TELEGRAM_BOT_TOKEN is not set. Bot cannot be initialized.")
+        # No raise here, as the app might still run for web panel even without bot functionality
+except Exception as e:
+    logger.critical(f"CRITICAL ERROR: Failed to initialize Bot or Dispatcher at global scope: {e}", exc_info=True)
+    # Re-raise here to prevent the app from starting if bot initialization fails critically
+    raise
 
 # FastAPI app
 app = FastAPI(
@@ -1733,7 +1740,7 @@ async def process_ai_query(message: Message, state: FSMContext):
 
         # Call Gemini API
         chat_history = []
-        chat_history.append({"role": "user", "parts": [{"text": user_query}]})
+        chat_history.push({"role": "user", "parts": [{"text": user_query}]})
         payload = {"contents": chat_history}
         api_key = "" # Canvas will provide this at runtime
         api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
@@ -2061,10 +2068,14 @@ async def start_worker_jobs():
     if WEB_APP_URL and TELEGRAM_BOT_TOKEN:
         webhook_url = f"{WEB_APP_URL}/webhook"
         try:
-            await bot.set_webhook(webhook_url)
-            logger.info(f"Webhook set to {webhook_url}")
+            # Ensure bot is not None before setting webhook
+            if bot:
+                await bot.set_webhook(webhook_url)
+                logger.info(f"Webhook set to {webhook_url}")
+            else:
+                logger.warning("Bot object is None in worker. Cannot set webhook.")
         except Exception as e:
-            logger.error(f"Failed to set webhook: {e}", exc_info=True)
+            logger.error(f"Failed to set webhook in worker: {e}", exc_info=True)
     else:
         logger.warning("WEB_APP_URL or TELEGRAM_BOT_TOKEN not set. Webhook will not be set.")
 
@@ -2127,21 +2138,30 @@ if __name__ == "__main__":
         @app.on_event("startup")
         async def on_startup_web(): # Renamed to avoid conflict
             logger.info("FastAPI app startup: Initializing DB pool and setting webhook...")
-            await get_db_pool() # Initialize DB pool for web process
-            if TELEGRAM_BOT_TOKEN and WEB_APP_URL:
-                webhook_url = f"{WEB_APP_URL}/webhook"
-                try:
-                    await bot.set_webhook(webhook_url)
-                    logger.info(f"Webhook set to {webhook_url}")
-                except Exception as e:
-                    logger.error(f"Failed to set webhook on startup: {e}", exc_info=True)
-            else:
-                logger.warning("WEB_APP_URL or TELEGRAM_BOT_TOKEN not set. Webhook will not be set on startup.")
+            try:
+                await get_db_pool() # Initialize DB pool for web process
+                logger.info("DB pool initialized for web process.")
+                if TELEGRAM_BOT_TOKEN and WEB_APP_URL:
+                    webhook_url = f"{WEB_APP_URL}/webhook"
+                    logger.info(f"Attempting to set webhook to {webhook_url}")
+                    # Ensure bot is not None before calling set_webhook
+                    if bot:
+                        await bot.set_webhook(webhook_url)
+                        logger.info(f"Webhook set to {webhook_url} successfully.")
+                    else:
+                        logger.error("Bot object is None. Cannot set webhook.")
+                        # This should not happen if TELEGRAM_BOT_TOKEN is set, but good to check.
+                else:
+                    logger.warning("WEB_APP_URL or TELEGRAM_BOT_TOKEN not set. Webhook will not be set on startup.")
+            except Exception as e:
+                logger.error(f"Failed during FastAPI app startup: {e}", exc_info=True)
+                # Re-raise to prevent the app from starting if critical startup fails
+                raise # Re-raise the exception
 
         @app.on_event("shutdown")
         async def on_shutdown():
             logger.info("FastAPI app shutdown: Deleting webhook and closing DB pool...")
-            if TELEGRAM_BOT_TOKEN:
+            if TELEGRAM_BOT_TOKEN and bot: # Check bot is not None
                 try:
                     await bot.delete_webhook()
                     logger.info("Webhook deleted.")
@@ -2555,11 +2575,6 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"Web: Error deleting news item {news_id}: {e}", exc_info=True)
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-        # The `on_startup` function was duplicated and causing issues.
-        # It's already handled by the `@app.on_event("startup")` decorator above.
-        # The scheduler should only be started by the 'worker' process.
-        # Removed the duplicated `on_startup` function definition here.
 
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
