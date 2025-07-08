@@ -10,7 +10,7 @@ import base64
 import time
 from typing import List, Optional, Dict, Any, Union
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
-import re # Додано імпорт модуля re
+import re
 
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.enums import ParseMode
@@ -36,25 +36,20 @@ from croniter import croniter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import BaseModel, Field
 
-# Імпорт ваших локальних модулів
 from database import get_db_pool, get_user_by_telegram_id, update_user_field, get_source_by_id, get_all_active_sources, add_news_item, get_news_by_source_id, get_all_news, get_user_bookmarks, add_bookmark, delete_bookmark, get_user_news_views, add_user_news_view, get_user_news_reactions, add_user_news_reaction, update_news_item, get_news_item_by_id, get_source_by_url, add_source, update_source_status, get_all_sources, get_bot_setting, update_bot_setting, get_user_by_id, get_last_n_news, update_source_last_parsed, get_news_for_digest, get_tasks_by_status, update_task_status, add_task_to_queue, get_all_users, get_user_subscriptions, add_user_subscription, delete_user_subscription, get_all_subscribed_sources, get_source_stats, update_source_stats, delete_user, delete_source
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, WEB_APP_URL, API_KEY_NAME, API_KEY
 
-# Налаштування логування
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Додаємо обробник для виведення логів у консоль
 stream_handler = logging.StreamHandler()
 stream_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
 
-# Ініціалізація FastAPI
 app = FastAPI(title="News Bot API")
 
-# API Key для доступу до адмін-панелі
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 async def get_api_key(api_key: str = Depends(api_key_header)):
@@ -62,25 +57,15 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
         return api_key
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials")
 
-# Ініціалізація бота та диспетчера
-# Використовуємо DefaultBotProperties для встановлення ParseMode
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 
-# Глобальний обробник помилок для диспетчера
 @dp.errors()
-async def errors_handler(exception: Exception, event: types.ErrorEvent):
-    logger.error(f"Error occurred in handler for update {event.update.update_id}: {exception}", exc_info=exception)
-    # Optionally, send a message to the admin about the error
-    # if ADMIN_TELEGRAM_ID != 0:
-    #     try:
-    #         await bot.send_message(ADMIN_TELEGRAM_ID, f"An error occurred in the bot: {exception}\nUpdate: {event.update.model_dump_json(indent=2)}")
-    #     except Exception as e:
-    #         logger.error(f"Failed to send error message to admin: {e}")
+async def errors_handler(exception: Exception, update: types.Update):
+    logger.error(f"Error occurred in handler for update {update.update_id}: {exception}", exc_info=exception)
 
 
-# Визначення станів для FSM
 class UserSettings(StatesGroup):
     choosing_language = State()
     choosing_digest_frequency = State()
@@ -138,12 +123,10 @@ class SourceManagement(StatesGroup):
 class NewsDigest(StatesGroup):
     waiting_for_digest_send_time = State()
 
-# Функція для перевірки, чи є користувач адміністратором
 async def is_admin_check(message: Message) -> bool:
     user_data = await get_user_by_telegram_id(message.from_user.id)
     return user_data and user_data.get('is_admin', False)
 
-# Функція для отримання або створення користувача
 async def get_or_create_user(telegram_id: int, username: str, first_name: str, last_name: str) -> Dict[str, Any]:
     user = await get_user_by_telegram_id(telegram_id)
     if not user:
@@ -158,18 +141,15 @@ async def get_or_create_user(telegram_id: int, username: str, first_name: str, l
                     await conn.commit()
         logger.info(f"New user registered: {username} ({telegram_id})")
     else:
-        # Оновлюємо last_active при кожній взаємодії
         await update_user_field(telegram_id, 'last_active', datetime.now(timezone.utc))
-        # Оновлюємо ai_requests_today, якщо дата змінилася
         if user.get('ai_last_request_date') != date.today():
             await update_user_field(telegram_id, 'ai_requests_today', 0)
             await update_user_field(telegram_id, 'ai_last_request_date', date.today())
 
     return user
 
-# Middleware для всіх повідомлень
 @dp.message()
-async def user_middleware(message: Message, state: FSMContext):
+async def user_middleware(message: Message, state: FSMContext, handler):
     if message.from_user:
         await get_or_create_user(
             message.from_user.id,
@@ -177,10 +157,9 @@ async def user_middleware(message: Message, state: FSMContext):
             message.from_user.first_name,
             message.from_user.last_name
         )
-    await dp.router.process_message(message, state)
+    await handler(message, state)
 
 
-# Обробник команди /start
 @router.message(CommandStart())
 async def command_start_handler(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(
@@ -217,7 +196,6 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
     await message.answer(welcome_text, reply_markup=markup)
     await state.clear()
 
-# Обробник команди /menu
 @router.message(Command("menu"))
 async def command_menu_handler(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(
@@ -251,7 +229,6 @@ async def command_menu_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
 
 
-# Обробник кнопки "Налаштування"
 @router.callback_query(F.data == "settings")
 async def settings_callback_handler(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_telegram_id(callback.from_user.id)
@@ -259,7 +236,7 @@ async def settings_callback_handler(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Користувача не знайдено.", show_alert=True)
         return
 
-    lang_status = "✅" if user.get('preferred_language') == 'uk' else "🇺🇸" # Приклад: якщо 'uk' - українська, інакше англійська
+    lang_status = "✅" if user.get('preferred_language') == 'uk' else "🇺🇸"
     notifications_status = "✅ Увімкнено" if user.get('auto_notifications') else "❌ Вимкнено"
     digest_freq = user.get('digest_frequency', 'daily')
     safe_mode_status = "✅ Увімкнено" if user.get('safe_mode') else "❌ Вимкнено"
@@ -277,7 +254,6 @@ async def settings_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Оберіть налаштування:", reply_markup=markup)
     await callback.answer()
 
-# Обробник кнопки "Мова новин"
 @router.callback_query(F.data == "set_language")
 async def set_language_callback_handler(callback: CallbackQuery, state: FSMContext):
     kb = [
@@ -290,16 +266,14 @@ async def set_language_callback_handler(callback: CallbackQuery, state: FSMConte
     await state.set_state(UserSettings.choosing_language)
     await callback.answer()
 
-# Обробник вибору мови
 @router.callback_query(F.data.startswith("set_lang_"), UserSettings.choosing_language)
 async def process_language_choice(callback: CallbackQuery, state: FSMContext):
     lang_code = callback.data.split("_")[2]
     await update_user_field(callback.from_user.id, 'preferred_language', lang_code)
     await callback.answer(f"Мову встановлено на {lang_code.upper()}", show_alert=True)
     await state.clear()
-    await settings_callback_handler(callback, state) # Повертаємося до налаштувань
+    await settings_callback_handler(callback, state)
 
-# Обробник кнопки "Авто-сповіщення"
 @router.callback_query(F.data == "toggle_notifications")
 async def toggle_notifications_callback_handler(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_telegram_id(callback.from_user.id)
@@ -309,7 +283,6 @@ async def toggle_notifications_callback_handler(callback: CallbackQuery, state: 
     await callback.answer(f"Авто-сповіщення {status_text}.", show_alert=True)
     await settings_callback_handler(callback, state)
 
-# Обробник кнопки "Дайджест новин"
 @router.callback_query(F.data == "set_digest_frequency")
 async def set_digest_frequency_callback_handler(callback: CallbackQuery, state: FSMContext):
     kb = [
@@ -323,7 +296,6 @@ async def set_digest_frequency_callback_handler(callback: CallbackQuery, state: 
     await state.set_state(UserSettings.choosing_digest_frequency)
     await callback.answer()
 
-# Обробник вибору частоти дайджесту
 @router.callback_query(F.data.startswith("set_digest_"), UserSettings.choosing_digest_frequency)
 async def process_digest_frequency_choice(callback: CallbackQuery, state: FSMContext):
     freq_code = callback.data.split("_")[2]
@@ -332,7 +304,6 @@ async def process_digest_frequency_choice(callback: CallbackQuery, state: FSMCon
     await state.clear()
     await settings_callback_handler(callback, state)
 
-# Обробник кнопки "Безпечний режим"
 @router.callback_query(F.data == "toggle_safe_mode")
 async def toggle_safe_mode_callback_handler(callback: CallbackQuery, state: FSMContext):
     user = await get_user_by_telegram_id(callback.from_user.id)
@@ -342,7 +313,6 @@ async def toggle_safe_mode_callback_handler(callback: CallbackQuery, state: FSMC
     await callback.answer(f"Безпечний режим {status_text}.", show_alert=True)
     await settings_callback_handler(callback, state)
 
-# Обробник кнопки "Режим перегляду"
 @router.callback_query(F.data == "set_view_mode")
 async def set_view_mode_callback_handler(callback: CallbackQuery, state: FSMContext):
     kb = [
@@ -355,7 +325,6 @@ async def set_view_mode_callback_handler(callback: CallbackQuery, state: FSMCont
     await state.set_state(UserSettings.choosing_view_mode)
     await callback.answer()
 
-# Обробник вибору режиму перегляду
 @router.callback_query(F.data.startswith("set_view_"), UserSettings.choosing_view_mode)
 async def process_view_mode_choice(callback: CallbackQuery, state: FSMContext):
     view_mode = callback.data.split("_")[2]
@@ -364,7 +333,6 @@ async def process_view_mode_choice(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await settings_callback_handler(callback, state)
 
-# Обробник кнопки "Моя стрічка"
 @router.callback_query(F.data == "my_feed")
 async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
     user_id = callback.from_user.id
@@ -383,7 +351,7 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
         return
 
     source_ids = [s['source_id'] for s in subscribed_sources]
-    all_news = await get_last_n_news(source_ids=source_ids, limit=100) # Отримуємо більше новин для пагінації
+    all_news = await get_last_n_news(source_ids=source_ids, limit=100)
 
     if not all_news:
         kb = [[InlineKeyboardButton(text="Підписатися на джерела", callback_data="manage_subscriptions")],
@@ -393,7 +361,6 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
         await callback.answer()
         return
 
-    # Пагінація
     news_per_page = 5
     total_pages = (len(all_news) + news_per_page - 1) // news_per_page
     start_index = page * news_per_page
@@ -401,10 +368,10 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
     current_news_page = all_news[start_index:end_index]
 
     if not current_news_page:
-        if page > 0: # Якщо ми намагалися перейти на порожню сторінку вперед
+        if page > 0:
             await callback.answer("Це остання сторінка новин.", show_alert=True)
-            await my_feed_callback_handler(callback, page=page-1) # Повертаємося на попередню сторінку
-        else: # Якщо стрічка порожня
+            await my_feed_callback_handler(callback, page=page-1)
+        else:
             kb = [[InlineKeyboardButton(text="Підписатися на джерела", callback_data="manage_subscriptions")],
                   [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]]
             markup = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -417,21 +384,16 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
         title = news_item['title']
         source_name = (await get_source_by_id(news_item['source_id']))['name']
         published_at_utc = news_item['published_at']
-        # Конвертуємо UTC в локальний час користувача, якщо потрібно
-        # Наразі припустимо, що всі дати зберігаються в UTC і відображаються як UTC
         published_at_str = published_at_utc.strftime("%d.%m.%Y %H:%M") if published_at_utc else "Невідомо"
         news_url = news_item['source_url']
         news_id = news_item['id']
 
-        # Перевіряємо, чи новина вже переглянута користувачем
         views = await get_user_news_views(user['id'], news_id)
-        viewed_status = "👁️" if views else "" # Якщо є записи про перегляд, позначаємо як переглянуту
+        viewed_status = "👁️" if views else ""
 
-        # Перевіряємо, чи новина в закладках
         is_bookmarked = await get_user_bookmarks(user['id'], news_id)
         bookmark_status = "🔖" if is_bookmarked else "🗃️"
 
-        # Визначаємо реакції
         reactions = await get_user_news_reactions(user['id'], news_id)
         like_status = "👍" if reactions and reactions.get('reaction_type') == 'like' else "🤍"
         dislike_status = "👎" if reactions and reactions.get('reaction_type') == 'dislike' else "🖤"
@@ -444,17 +406,15 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
                 f"{viewed_status} {hlink('Читати далі', news_url)}\n"
                 f"Реакції: {like_status} {dislike_status} | {bookmark_status} | <a href='{WEB_APP_URL}/news/{news_id}'>Детальніше</a>\n\n"
             )
-        else: # Короткий режим
+        else:
             news_text += (
                 f"<b>{title}</b>\n"
                 f"{source_name} | {published_at_str} UTC | {viewed_status} {hlink('Читати', news_url)}\n"
                 f"Реакції: {like_status} {dislike_status} | {bookmark_status} | /news_{news_id}\n\n"
             )
 
-        # Додаємо новину до переглянутих
         await add_user_news_view(user['id'], news_id)
 
-    # Кнопки пагінації
     pagination_buttons = []
     if page > 0:
         pagination_buttons.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"my_feed_page_{page-1}"))
@@ -472,13 +432,11 @@ async def my_feed_callback_handler(callback: CallbackQuery, page: int = 0):
     await callback.message.edit_text(news_text, reply_markup=markup, disable_web_page_preview=True)
     await callback.answer()
 
-# Обробник пагінації "Моя стрічка"
 @router.callback_query(F.data.startswith("my_feed_page_"))
 async def my_feed_pagination_handler(callback: CallbackQuery):
     page = int(callback.data.split("_")[3])
     await my_feed_callback_handler(callback, page=page)
 
-# Обробник кнопки "Керувати підписками"
 @router.callback_query(F.data == "manage_subscriptions")
 async def manage_subscriptions_callback_handler(callback: CallbackQuery, page: int = 0):
     user_id = callback.from_user.id
@@ -494,7 +452,6 @@ async def manage_subscriptions_callback_handler(callback: CallbackQuery, page: i
         await callback.answer()
         return
 
-    # Пагінація джерел
     sources_per_page = 5
     total_pages = (len(all_sources) + sources_per_page - 1) // sources_per_page
     start_index = page * sources_per_page
@@ -521,13 +478,11 @@ async def manage_subscriptions_callback_handler(callback: CallbackQuery, page: i
     await callback.message.edit_text("Керування підписками на джерела:", reply_markup=markup)
     await callback.answer()
 
-# Обробник пагінації "Керувати підписками"
 @router.callback_query(F.data.startswith("manage_subscriptions_page_"))
 async def manage_subscriptions_pagination_handler(callback: CallbackQuery):
     page = int(callback.data.split("_")[3])
     await manage_subscriptions_callback_handler(callback, page=page)
 
-# Обробник перемикання підписки
 @router.callback_query(F.data.startswith("toggle_sub_"))
 async def toggle_subscription_callback_handler(callback: CallbackQuery, state: FSMContext):
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
@@ -542,10 +497,8 @@ async def toggle_subscription_callback_handler(callback: CallbackQuery, state: F
         await add_user_subscription(user_id, source_id)
         await callback.answer("Ви підписалися на джерело.", show_alert=True)
 
-    # Оновлюємо список підписок
     await manage_subscriptions_callback_handler(callback)
 
-# Обробник кнопки "Закладки"
 @router.callback_query(F.data == "bookmarks")
 async def bookmarks_callback_handler(callback: CallbackQuery, page: int = 0):
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
@@ -558,7 +511,6 @@ async def bookmarks_callback_handler(callback: CallbackQuery, page: int = 0):
         await callback.answer()
         return
 
-    # Пагінація
     news_per_page = 5
     total_pages = (len(user_bookmarks) + news_per_page - 1) // news_per_page
     start_index = page * news_per_page
@@ -599,13 +551,11 @@ async def bookmarks_callback_handler(callback: CallbackQuery, page: int = 0):
     await callback.message.edit_text(bookmarks_text, reply_markup=markup, disable_web_page_preview=True)
     await callback.answer()
 
-# Обробник пагінації "Закладки"
 @router.callback_query(F.data.startswith("bookmarks_page_"))
 async def bookmarks_pagination_handler(callback: CallbackQuery):
     page = int(callback.data.split("_")[2])
     await bookmarks_callback_handler(callback, page=page)
 
-# Обробник команди для видалення закладки
 @router.message(Command(re.compile(r"del_bookmark_(\d+)")))
 async def delete_bookmark_command_handler(message: Message):
     news_id = int(message.text.split("_")[2])
@@ -616,11 +566,9 @@ async def delete_bookmark_command_handler(message: Message):
     else:
         await message.answer("Ця новина не була у ваших закладках.")
 
-    # Оновлюємо список закладок після видалення
     await bookmarks_callback_handler(message)
 
 
-# Обробник кнопки "Пошук новин"
 @router.callback_query(F.data == "search_news")
 async def search_news_callback_handler(callback: CallbackQuery):
     await callback.message.edit_text("Наразі функція пошуку новин в розробці. Будь ласка, спробуйте пізніше.",
@@ -629,7 +577,6 @@ async def search_news_callback_handler(callback: CallbackQuery):
                                      ]))
     await callback.answer()
 
-# Обробник кнопки "AI Асистент"
 @router.callback_query(F.data == "ai_assistant")
 async def ai_assistant_callback_handler(callback: CallbackQuery):
     await callback.message.edit_text("Наразі AI Асистент в розробці. Будь ласка, спробуйте пізніше.",
@@ -638,7 +585,6 @@ async def ai_assistant_callback_handler(callback: CallbackQuery):
                                      ]))
     await callback.answer()
 
-# Обробник кнопки "Преміум"
 @router.callback_query(F.data == "premium")
 async def premium_callback_handler(callback: CallbackQuery):
     await callback.message.edit_text("Інформація про Преміум доступна незабаром. Слідкуйте за оновленнями!",
@@ -647,7 +593,6 @@ async def premium_callback_handler(callback: CallbackQuery):
                                      ]))
     await callback.answer()
 
-# Обробник кнопки "Про бота"
 @router.callback_query(F.data == "about_bot")
 async def about_bot_callback_handler(callback: CallbackQuery):
     about_text = (
@@ -662,7 +607,6 @@ async def about_bot_callback_handler(callback: CallbackQuery):
     ]))
     await callback.answer()
 
-# Обробник кнопки "Адмін-панель"
 @router.callback_query(F.data == "admin_panel", is_admin_check)
 async def admin_panel_callback_handler(callback: CallbackQuery, state: FSMContext):
     kb = [
@@ -680,7 +624,6 @@ async def admin_panel_callback_handler(callback: CallbackQuery, state: FSMContex
     await state.set_state(UserSettings.admin_panel)
     await callback.answer()
 
-# Обробник кнопки "Статистика джерел" (Адмін)
 @router.callback_query(F.data == "admin_source_stats", is_admin_check)
 async def admin_source_stats_callback_handler(callback: CallbackQuery):
     sources = await get_all_sources()
@@ -711,7 +654,6 @@ async def admin_source_stats_callback_handler(callback: CallbackQuery):
     await callback.message.edit_text(stats_text, reply_markup=markup, disable_web_page_preview=True)
     await callback.answer()
 
-# Обробник кнопки "Надіслати повідомлення" (Адмін)
 @router.callback_query(F.data == "admin_send_message", is_admin_check)
 async def admin_send_message_callback_handler(callback: CallbackQuery, state: FSMContext):
     kb = [
@@ -729,7 +671,6 @@ async def admin_send_message_callback_handler(callback: CallbackQuery, state: FS
     await state.set_state(UserSettings.admin_select_message_target)
     await callback.answer()
 
-# Обробник вибору цільової аудиторії для повідомлення
 @router.callback_query(F.data.startswith("send_message_"), UserSettings.admin_select_message_target, is_admin_check)
 async def process_send_message_target(callback: CallbackQuery, state: FSMContext):
     target_type = callback.data.split("_")[2]
@@ -758,7 +699,6 @@ async def process_send_message_target(callback: CallbackQuery, state: FSMContext
         await state.set_state(UserSettings.admin_enter_message_text)
     await callback.answer()
 
-# Обробник вибору мови для повідомлення
 @router.callback_query(F.data.startswith("send_message_lang_"), UserSettings.admin_select_message_language_code, is_admin_check)
 async def process_send_message_language_code(callback: CallbackQuery, state: FSMContext):
     lang_code = callback.data.split("_")[3]
@@ -770,7 +710,6 @@ async def process_send_message_language_code(callback: CallbackQuery, state: FSM
     await state.set_state(UserSettings.admin_enter_message_text)
     await callback.answer()
 
-# Обробник введення ID користувача для повідомлення
 @router.message(UserSettings.admin_select_message_user, is_admin_check)
 async def process_send_message_user_id(message: Message, state: FSMContext):
     try:
@@ -794,7 +733,6 @@ async def process_send_message_user_id(message: Message, state: FSMContext):
                                  [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_send_message")]
                              ]))
 
-# Обробник введення тексту повідомлення
 @router.message(UserSettings.admin_enter_message_text, is_admin_check)
 async def process_admin_enter_message_text(message: Message, state: FSMContext):
     message_text = message.text
@@ -829,7 +767,6 @@ async def process_admin_enter_message_text(message: Message, state: FSMContext):
     await message.answer(confirm_text, reply_markup=markup, parse_mode=ParseMode.HTML)
     await state.set_state(UserSettings.admin_confirm_send_message)
 
-# Обробник підтвердження надсилання повідомлення
 @router.callback_query(F.data == "confirm_send_message", UserSettings.admin_confirm_send_message, is_admin_check)
 async def process_confirm_send_message(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -867,7 +804,7 @@ async def process_confirm_send_message(callback: CallbackQuery, state: FSMContex
         try:
             await bot.send_message(chat_id=user['telegram_id'], text=message_text, parse_mode=ParseMode.HTML)
             sent_count += 1
-            await asyncio.sleep(0.05) # Невелика затримка, щоб уникнути Rate Limit
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"Не вдалося надіслати повідомлення користувачу {user['telegram_id']}: {e}")
             failed_count += 1
@@ -879,7 +816,6 @@ async def process_confirm_send_message(callback: CallbackQuery, state: FSMContex
     await state.clear()
     await callback.answer()
 
-# Обробник кнопки "Додати джерело" (Адмін)
 @router.callback_query(F.data == "admin_add_source", is_admin_check)
 async def admin_add_source_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введіть URL нового джерела:",
@@ -892,7 +828,6 @@ async def admin_add_source_callback_handler(callback: CallbackQuery, state: FSMC
 @router.message(SourceManagement.waiting_for_url, is_admin_check)
 async def process_source_url(message: Message, state: FSMContext):
     url = message.text
-    # Перевірка на валідність URL
     parsed_url = urlparse(url)
     if not all([parsed_url.scheme, parsed_url.netloc]):
         await message.answer("Будь ласка, введіть дійсний URL (наприклад, https://example.com).",
@@ -901,7 +836,6 @@ async def process_source_url(message: Message, state: FSMContext):
                              ]))
         return
 
-    # Перевірка на дублювання
     existing_source = await get_source_by_url(url)
     if existing_source:
         await message.answer("Джерело з таким URL вже існує в базі даних.",
@@ -941,7 +875,7 @@ async def process_source_category(message: Message, state: FSMContext):
 @router.message(SourceManagement.waiting_for_language, is_admin_check)
 async def process_source_language(message: Message, state: FSMContext):
     language = message.text
-    if language not in ['uk', 'en']: # Додайте інші мови, якщо потрібно
+    if language not in ['uk', 'en']:
         await message.answer("Будь ласка, введіть 'uk' або 'en'.",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                  [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="admin_panel")]
@@ -1002,7 +936,6 @@ async def process_source_parse_interval(message: Message, state: FSMContext):
                          ]))
     await state.clear()
 
-# Обробник кнопки "Редагувати джерело" (Адмін)
 @router.callback_query(F.data == "admin_edit_source", is_admin_check)
 async def admin_edit_source_callback_handler(callback: CallbackQuery, state: FSMContext):
     sources = await get_all_sources()
@@ -1074,7 +1007,6 @@ async def process_new_source_value(message: Message, state: FSMContext):
     field = data['edit_source_field']
     new_value = message.text
 
-    # Додаткова валідація для певних полів
     if field == 'url':
         parsed_url = urlparse(new_value)
         if not all([parsed_url.scheme, parsed_url.netloc]):
@@ -1107,14 +1039,13 @@ async def process_new_source_value(message: Message, state: FSMContext):
                                  ]))
             return
 
-    await update_source_status(source_id, {field: new_value}) # Використовуємо update_source_status для оновлення будь-якого поля
+    await update_source_status(source_id, {field: new_value})
     await message.answer(f"Поле '{field}' для джерела ID {source_id} оновлено.",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                              [InlineKeyboardButton(text="⬅️ Назад до адмін-панелі", callback_data="admin_panel")]
                          ]))
     await state.clear()
 
-# Обробник кнопки "Видалити джерело" (Адмін)
 @router.callback_query(F.data == "admin_delete_source", is_admin_check)
 async def admin_delete_source_callback_handler(callback: CallbackQuery, state: FSMContext):
     sources = await get_all_sources()
@@ -1168,7 +1099,7 @@ async def process_delete_source_id(message: Message, state: FSMContext):
 async def process_confirm_delete_source(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     source_id = data['delete_source_id']
-    await delete_source(source_id) # Припускаємо, що у вас є функція delete_source в database.py
+    await delete_source(source_id)
     await callback.message.edit_text(f"Джерело ID {source_id} успішно видалено.",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                          [InlineKeyboardButton(text="⬅️ Назад до адмін-панелі", callback_data="admin_panel")]
@@ -1176,7 +1107,6 @@ async def process_confirm_delete_source(callback: CallbackQuery, state: FSMConte
     await state.clear()
     await callback.answer()
 
-# Обробник кнопки "Керувати користувачами" (Адмін)
 @router.callback_query(F.data == "admin_manage_users", is_admin_check)
 async def admin_manage_users_callback_handler(callback: CallbackQuery, page: int = 0):
     users = await get_all_users()
@@ -1249,14 +1179,13 @@ async def process_admin_select_user_for_management(message: Message, state: FSMC
         markup = InlineKeyboardMarkup(inline_keyboard=kb)
         await message.answer(f"Оберіть дію для користувача ID {user_telegram_id} ({user['first_name']}):",
                              reply_markup=markup)
-        await state.set_state(UserSettings.admin_manage_users) # Повертаємося до загального стану керування користувачами
+        await state.set_state(UserSettings.admin_manage_users)
     except ValueError:
         await message.answer("Будь ласка, введіть дійсний числовий Telegram ID.",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                  [InlineKeyboardButton(text="⬅️ Скасувати", callback_data="admin_panel")]
                              ]))
 
-# Обробник перемикання статусу адміна
 @router.callback_query(F.data == "admin_toggle_admin_status", UserSettings.admin_manage_users, is_admin_check)
 async def admin_toggle_admin_status_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1266,9 +1195,8 @@ async def admin_toggle_admin_status_handler(callback: CallbackQuery, state: FSMC
     await update_user_field(user_telegram_id, 'is_admin', new_status)
     status_text = "адміністратором" if new_status else "звичайним користувачем"
     await callback.answer(f"Користувач {user_telegram_id} тепер є {status_text}.", show_alert=True)
-    await admin_manage_users_callback_handler(callback) # Повертаємося до списку користувачів
+    await admin_manage_users_callback_handler(callback)
 
-# Обробник кнопки "Змінити Преміум" (Адмін)
 @router.callback_query(F.data == "admin_edit_user_premium", UserSettings.admin_manage_users, is_admin_check)
 async def admin_edit_user_premium_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1293,9 +1221,8 @@ async def process_set_premium_status(callback: CallbackQuery, state: FSMContext)
     await update_user_field(user_telegram_id, 'is_premium', new_status)
     status_text = "увімкнено" if new_status else "вимкнено"
     await callback.answer(f"Преміум статус для користувача {user_telegram_id} {status_text}.", show_alert=True)
-    await admin_manage_users_callback_handler(callback) # Повертаємося до списку користувачів
+    await admin_manage_users_callback_handler(callback)
 
-# Обробник кнопки "Змінити PRO" (Адмін)
 @router.callback_query(F.data == "admin_edit_user_pro", UserSettings.admin_manage_users, is_admin_check)
 async def admin_edit_user_pro_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1320,9 +1247,8 @@ async def process_set_pro_status(callback: CallbackQuery, state: FSMContext):
     await update_user_field(user_telegram_id, 'is_pro', new_status)
     status_text = "увімкнено" if new_status else "вимкнено"
     await callback.answer(f"PRO статус для користувача {user_telegram_id} {status_text}.", show_alert=True)
-    await admin_manage_users_callback_handler(callback) # Повертаємося до списку користувачів
+    await admin_manage_users_callback_handler(callback)
 
-# Обробник кнопки "Змінити дайджест" (Адмін)
 @router.callback_query(F.data == "admin_edit_user_digest", UserSettings.admin_manage_users, is_admin_check)
 async def admin_edit_user_digest_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1347,9 +1273,8 @@ async def process_set_user_digest_frequency(callback: CallbackQuery, state: FSMC
     freq_code = callback.data.split("_")[3]
     await update_user_field(user_telegram_id, 'digest_frequency', freq_code)
     await callback.answer(f"Частоту дайджесту для користувача {user_telegram_id} встановлено на {freq_code}.", show_alert=True)
-    await admin_manage_users_callback_handler(callback) # Повертаємося до списку користувачів
+    await admin_manage_users_callback_handler(callback)
 
-# Обробник кнопки "Змінити AI запити" (Адмін)
 @router.callback_query(F.data == "admin_edit_user_ai_requests", UserSettings.admin_manage_users, is_admin_check)
 async def admin_edit_user_ai_requests_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1372,16 +1297,15 @@ async def process_set_user_ai_requests(message: Message, state: FSMContext):
         data = await state.get_data()
         user_telegram_id = data['manage_user_id']
         await update_user_field(user_telegram_id, 'ai_requests_today', new_requests)
-        await update_user_field(user_telegram_id, 'ai_last_request_date', date.today()) # Оновлюємо дату, щоб скинути лічильник
+        await update_user_field(user_telegram_id, 'ai_last_request_date', date.today())
         await message.answer(f"Кількість AI запитів для користувача {user_telegram_id} встановлено на {new_requests}.", show_alert=True)
-        await admin_manage_users_callback_handler(message) # Повертаємося до списку користувачів
+        await admin_manage_users_callback_handler(message)
     except ValueError:
         await message.answer("Будь ласка, введіть дійсне невід'ємне число.",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                  [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_manage_users")]
                              ]))
 
-# Обробник кнопки "Змінити мову" (Адмін)
 @router.callback_query(F.data == "admin_edit_user_language", UserSettings.admin_manage_users, is_admin_check)
 async def admin_edit_user_language_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1405,9 +1329,8 @@ async def process_set_user_language(callback: CallbackQuery, state: FSMContext):
     lang_code = callback.data.split("_")[3]
     await update_user_field(user_telegram_id, 'preferred_language', lang_code)
     await callback.answer(f"Мову для користувача {user_telegram_id} встановлено на {lang_code.upper()}.", show_alert=True)
-    await admin_manage_users_callback_handler(callback) # Повертаємося до списку користувачів
+    await admin_manage_users_callback_handler(callback)
 
-# Обробник кнопки "Видалити користувача" (Адмін)
 @router.callback_query(F.data == "admin_delete_user", UserSettings.admin_manage_users, is_admin_check)
 async def admin_delete_user_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -1428,7 +1351,7 @@ async def admin_delete_user_handler(callback: CallbackQuery, state: FSMContext):
 async def process_confirm_delete_user(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_telegram_id = data['manage_user_id']
-    await delete_user(user_telegram_id) # Припускаємо, що у вас є функція delete_user в database.py
+    await delete_user(user_telegram_id)
     await callback.message.edit_text(f"Користувача {user_telegram_id} успішно видалено.",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                          [InlineKeyboardButton(text="⬅️ Назад до адмін-панелі", callback_data="admin_panel")]
@@ -1436,10 +1359,9 @@ async def process_confirm_delete_user(callback: CallbackQuery, state: FSMContext
     await state.clear()
     await callback.answer()
 
-# Обробник кнопки "Налаштування бота" (Адмін)
 @router.callback_query(F.data == "admin_edit_bot_settings", is_admin_check)
 async def admin_edit_bot_settings_callback_handler(callback: CallbackQuery, state: FSMContext):
-    settings_keys = ["DEFAULT_PARSE_INTERVAL_MINUTES", "MAX_AI_REQUESTS_PER_DAY"] # Додайте інші налаштування, якщо є
+    settings_keys = ["DEFAULT_PARSE_INTERVAL_MINUTES", "MAX_AI_REQUESTS_PER_DAY"]
     kb = []
     for key in settings_keys:
         setting_value = await get_bot_setting(key)
@@ -1469,7 +1391,6 @@ async def process_new_bot_setting_value(message: Message, state: FSMContext):
     setting_key = data['edit_setting_key']
     new_value = message.text
 
-    # Додаткова валідація для числових налаштувань
     if setting_key in ["DEFAULT_PARSE_INTERVAL_MINUTES", "MAX_AI_REQUESTS_PER_DAY"]:
         try:
             new_value = int(new_value)
@@ -1482,17 +1403,16 @@ async def process_new_bot_setting_value(message: Message, state: FSMContext):
                                  ]))
             return
 
-    await update_bot_setting(setting_key, str(new_value)) # Зберігаємо як текст
+    await update_bot_setting(setting_key, str(new_value))
     await message.answer(f"Налаштування '{setting_key}' оновлено до '{new_value}'.",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                              [InlineKeyboardButton(text="⬅️ Назад до адмін-панелі", callback_data="admin_panel")]
                          ]))
     await state.clear()
 
-# Обробник команди /news_{id} для детального перегляду новини
 @router.message(Command(re.compile(r"news_(\d+)")))
-async def show_detailed_news(message: Message, news_id: Optional[int] = None): # Додано news_id як опціональний аргумент
-    if news_id is None: # Якщо news_id не передано, отримуємо його з тексту повідомлення
+async def show_detailed_news(message: Message, news_id: Optional[int] = None):
+    if news_id is None:
         news_id = int(message.text.split("_")[1])
 
     news_item = await get_news_item_by_id(news_id)
@@ -1503,7 +1423,6 @@ async def show_detailed_news(message: Message, news_id: Optional[int] = None): #
 
     user_id = (await get_user_by_telegram_id(message.from_user.id))['id']
 
-    # Додаємо новину до переглянутих
     await add_user_news_view(user_id, news_id)
 
     title = news_item['title']
@@ -1514,12 +1433,10 @@ async def show_detailed_news(message: Message, news_id: Optional[int] = None): #
     image_url = news_item['image_url']
     news_url = news_item['source_url']
 
-    # Перевіряємо, чи новина в закладках
     is_bookmarked = await get_user_bookmarks(user_id, news_id)
     bookmark_action = "add_bookmark" if not is_bookmarked else "remove_bookmark"
     bookmark_text = "🔖 Додати в закладки" if not is_bookmarked else "🗑️ Видалити із закладок"
 
-    # Визначаємо реакції
     reactions = await get_user_news_reactions(user_id, news_id)
     like_action = "like_news" if not (reactions and reactions.get('reaction_type') == 'like') else "unlike_news"
     dislike_action = "dislike_news" if not (reactions and reactions.get('reaction_type') == 'dislike') else "undislike_news"
@@ -1536,7 +1453,6 @@ async def show_detailed_news(message: Message, news_id: Optional[int] = None): #
     )
 
     if image_url:
-        # Можливо, варто додати перевірку на валідність image_url
         await message.answer_photo(photo=image_url, caption=response_text, parse_mode=ParseMode.HTML,
                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                        [InlineKeyboardButton(text=bookmark_text, callback_data=f"{bookmark_action}_{news_id}")],
@@ -1555,7 +1471,6 @@ async def show_detailed_news(message: Message, news_id: Optional[int] = None): #
                                  [InlineKeyboardButton(text="⬅️ Назад до меню", callback_data="menu")]
                              ]))
 
-# Обробники для додавання/видалення закладок та реакцій
 @router.callback_query(F.data.startswith("add_bookmark_"))
 async def add_bookmark_handler(callback: CallbackQuery):
     news_id = int(callback.data.split("_")[2])
@@ -1564,8 +1479,7 @@ async def add_bookmark_handler(callback: CallbackQuery):
         await callback.answer("Новину додано до закладок!", show_alert=True)
     else:
         await callback.answer("Новина вже є у ваших закладках.", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 @router.callback_query(F.data.startswith("remove_bookmark_"))
 async def remove_bookmark_handler(callback: CallbackQuery):
@@ -1575,8 +1489,7 @@ async def remove_bookmark_handler(callback: CallbackQuery):
         await callback.answer("Новину видалено із закладок.", show_alert=True)
     else:
         await callback.answer("Цієї новини немає у ваших закладках.", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 @router.callback_query(F.data.startswith("like_news_"))
 async def like_news_handler(callback: CallbackQuery):
@@ -1584,17 +1497,15 @@ async def like_news_handler(callback: CallbackQuery):
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
     await add_user_news_reaction(user_id, news_id, 'like')
     await callback.answer("Вам сподобалася новина!", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 @router.callback_query(F.data.startswith("unlike_news_"))
 async def unlike_news_handler(callback: CallbackQuery):
     news_id = int(callback.data.split("_")[2])
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, None) # Видаляємо реакцію
+    await add_user_news_reaction(user_id, news_id, None)
     await callback.answer("Лайк видалено.", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 @router.callback_query(F.data.startswith("dislike_news_"))
 async def dislike_news_handler(callback: CallbackQuery):
@@ -1602,44 +1513,33 @@ async def dislike_news_handler(callback: CallbackQuery):
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
     await add_user_news_reaction(user_id, news_id, 'dislike')
     await callback.answer("Вам не сподобалася новина.", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 @router.callback_query(F.data.startswith("undislike_news_"))
 async def undislike_news_handler(callback: CallbackQuery):
     news_id = int(callback.data.split("_")[2])
     user_id = (await get_user_by_telegram_id(callback.from_user.id))['id']
-    await add_user_news_reaction(user_id, news_id, None) # Видаляємо реакцію
+    await add_user_news_reaction(user_id, news_id, None)
     await callback.answer("Дизлайк видалено.", show_alert=True)
-    # Оновлюємо кнопки після дії
-    await show_detailed_news(callback.message, news_id=news_id) # Передаємо news_id для оновлення кнопок
+    await show_detailed_news(callback.message, news_id=news_id)
 
 
-# Загальний обробник для невідомих команд/тексту
 @router.message()
 async def echo_handler(message: types.Message) -> None:
-    """
-    Handler will forward receive a message back to the user
-    By default, message will be retransmitted without modification
-    """
     try:
         await message.send_copy(chat_id=message.chat.id)
     except TypeError:
-        # But not all the types is supported to be copied so need to handle it
         await message.answer("Nice try!")
 
 
-# Реєстрація роутера
 dp.include_router(router)
 
 
-# Запуск FastAPI
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting up FastAPI app...")
-    await get_db_pool() # Ініціалізуємо пул при запуску FastAPI
+    await get_db_pool()
 
-    # Встановлюємо вебхук для бота
     webhook_url = f"{WEB_APP_URL}/webhook"
     await bot.set_webhook(webhook_url)
     logger.info(f"Telegram webhook set to: {webhook_url}")
@@ -1647,22 +1547,16 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Shutting down FastAPI app...")
-    # Закриваємо пул з'єднань до бази даних
     pool = await get_db_pool()
     if pool:
         await pool.close()
-    # Видаляємо вебхук при завершенні роботи
     await bot.delete_webhook()
     logger.info("Telegram webhook deleted.")
-    # Закриваємо сесію бота
     if bot:
         await bot.session.close()
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    """
-    Endpoint for Telegram webhook updates.
-    """
     update = types.Update.model_validate(await request.json(), context={"bot": bot})
     await dp.feed_update(bot, update)
     return {"ok": True}
@@ -1696,9 +1590,6 @@ async def read_root():
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel_web(api_key: str = Depends(get_api_key)):
-    # Тут можна додати логіку для відображення адмін-панелі
-    # Наприклад, список джерел, користувачів тощо.
-    # Для простоти, поки що заглушка.
     sources = await get_all_sources()
     users = await get_all_users()
 
@@ -1754,7 +1645,6 @@ async def get_news_detail(news_id: int):
     source_name = source['name'] if source else "Невідоме джерело"
     published_at_str = news_item['published_at'].strftime("%d.%m.%Y %H:%M") if news_item['published_at'] else "Невідомо"
 
-    # Простий HTML для відображення новини
     return f"""
     <!DOCTYPE html>
     <html>
@@ -1789,12 +1679,7 @@ async def get_news_detail(news_id: int):
 
 @app.get("/news_digest", response_class=HTMLResponse)
 async def get_news_digest_web():
-    # Ця функція може бути викликана для відображення дайджесту новин у веб-інтерфейсі
-    # Наразі вона повертає заглушку. Можна розширити для відображення реальних новин.
     news_html = "<li>Наразі дайджест новин недоступний.</li>"
-    # Тут можна отримати новини для дайджесту, наприклад:
-    # news_for_digest = await get_news_for_digest_web_version()
-    # news_html = "".join([f"<li><a href='{n['source_url']}'>{n['title']}</a></li>" for n in news_for_digest])
 
     return f"""
     <!DOCTYPE html>
@@ -1821,22 +1706,12 @@ async def get_news_digest_web():
     </html>
     """
 
-# Запуск Uvicorn (для локального тестування, Render використовує Procfile)
 if __name__ == "__main__":
     import uvicorn
-    # Завантажуємо змінні середовища з .env файлу
     load_dotenv()
-    # Перевіряємо, чи встановлено TELEGRAM_BOT_TOKEN
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is not set.")
-        # Замість sys.exit(1) просто виводимо помилку і дозволяємо FastAPI запуститися
-        # Це дозволить веб-частині додатка працювати, навіть якщо бот не може підключитися
     
-    # Цей блок виконується лише при локальному запуску файлу bot.py напряму.
-    # На Render, Procfile запускає Uvicorn, який імпортує 'app',
-    # тому цей блок не виконується в розгорнутому середовищі.
-    # Якщо ви хочете запустити polling бота локально разом з FastAPI,
-    # вам знадобиться більш складна конфігурація або окремі процеси.
     logger.info("Running FastAPI app locally via uvicorn. Bot polling will not start automatically here.")
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
