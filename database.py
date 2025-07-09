@@ -3,7 +3,7 @@ import logging
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union # Added Union to the import
 from datetime import datetime, timezone, date
 import json
 
