@@ -9,4 +9,5 @@ psql $DATABASE_URL -f schema.sql -X
 echo "Схема бази даних успішно застосована."
 
 echo "Запуск воркера бота..."
-python bot.py
+# Запускаємо FastAPI додаток за допомогою uvicorn
+exec uvicorn bot:app --host 0.0.0.0 --port $PORT
