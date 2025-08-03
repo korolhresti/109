@@ -8,8 +8,4 @@ httpx==0.27.0
 beautifulsoup4==4.12.3
 lxml==5.2.2
 html5lib==1.1
-fastapi==0.111.0
-uvicorn==0.30.1
-gTTS==2.5.1
-pydantic==2.8.2
-feedparser==6.0.11
+croniter==2.0.0
