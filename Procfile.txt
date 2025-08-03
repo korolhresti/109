@@ -1,1 +1,2 @@
-worker: python bot.py worker
+# Запускаємо Python-скрипт як воркер
+worker: python bot.py

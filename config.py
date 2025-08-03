@@ -1,14 +1,18 @@
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Завантажуємо змінні оточення з .env файлу
 load_dotenv()
 
+# --- Конфігурація Telegram Bot API та каналу (Обов'язково) ---
+# Отримайте його від BotFather в Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8088739294:AAEODIRu7koBI4K9eABlomdKsTnl6AGYi4k")
+# ID каналу для публікації новин. Може бути як числом, так і рядком.
+# Отримайте його, надіславши будь-яке повідомлення в канал, а потім перевіривши `update.message.chat.id` через інший бот.
+# Зверніть увагу: це має бути приватний канал, де ваш бот є адміністратором.
+NEWS_CHANNEL_ID = os.getenv("NEWS_CHANNEL_ID")
 
-
-NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL_ID", "8184456641"))
-
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_oZ2hpO7IYebn@ep-bold-rain-a8719ym5-pooler.eastus2.azure.neon.tech/neondb?sslmode=require") # Updated with user's provided DATABASE_URL
+# --- Налаштування бази даних (Обов'язково) ---
+# Рядок підключення до бази даних PostgreSQL (наприклад, Neon.tech)
+DATABASE_URL = os.getenv("DATABASE_URL")
